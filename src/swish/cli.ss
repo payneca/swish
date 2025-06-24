@@ -71,7 +71,12 @@
        (match type
          [bool (or short long)]
          [count (or short long)]
-         [(string ,s) (guard (string? s)) #t]
+         [(string ,s . ,def*)
+          (guard (string? s))
+          (match def*
+            [() #t]
+            [(,_) #t]
+            [,_ #f])]
          [(list . ,patterns)
           (let lp ([patterns patterns])
             (match patterns
@@ -182,7 +187,7 @@
           (syntax-error spec (format "invalid ~a in" usage)))
         #`(<arg-spec> make
             [name '#,name]
-            [type '#,type]
+            [type `#,type]
             [short #,short]
             [long #,long]
             [help #,help]
@@ -318,7 +323,7 @@
            (take-opt arg* pos-specs)]
           [(,[spec <= `(<arg-spec> ,name ,type)] . ,pos-specs)
            (match type
-             [(string ,_)
+             [(string ,_ . ,_)
               (hashtable-set! ht name arg)
               (take-opt arg* pos-specs)]
              [(list . ,patterns)
@@ -344,31 +349,48 @@
 
       (define (take-named input arg* spec pos-specs)
         (<arg-spec> open spec [name type])
+        (define (set-present x)
+          (hashtable-update! ht name
+            (lambda (old)
+              (when old (fail "duplicate option ~a" input))
+              x)
+            #f))
         (match type
           [bool
-           (hashtable-update! ht name
-             (lambda (old)
-               (when old (fail "duplicate option ~a" input))
-               #t)
-             #f)
+           (set-present #t)
            (take-opt arg* pos-specs)]
           [count
            (hashtable-update! ht name (lambda (old) (+ old 1)) 0)
            (take-opt arg* pos-specs)]
-          [(string ,_)
-           (match arg*
-             [(,arg . ,rest)
-              (guard (not (maybe-option? arg)))
-              (hashtable-update! ht name
-                (lambda (old)
-                  (when old (fail "duplicate option ~a" input))
-                  (or old arg))
-                #f)
-              (take-opt rest pos-specs)]
-             [,_
-              (fail "option expects value: ~a ~a" input
-                (format-spec spec 'args))
-              (take-opt arg* pos-specs)])]
+          [(string ,_ . ,def*)
+           (match def*
+             [()
+              (match arg*
+                [(,arg . ,rest)
+                 (guard (not (maybe-option? arg)))
+                 (hashtable-update! ht name
+                   (lambda (old)
+                     (when old (fail "duplicate option ~a" input))
+                     (or old arg))
+                   #f)
+                 (take-opt rest pos-specs)]
+                [,_
+                 (fail "option expects value: ~a ~a" input
+                   (format-spec spec 'args))
+                 (take-opt arg* pos-specs)])]
+             [(,default)
+              (match arg*
+                [()
+                 (set-present default)
+                 (take-opt arg* pos-specs)]
+                [(,arg . ,rest)
+                 (cond
+                  [(maybe-option? arg)
+                   (set-present default)
+                   (take-opt arg* pos-specs)]
+                  [else
+                   (set-present arg)
+                   (take-opt rest pos-specs)])])])]
           [(list . ,patterns)
            (let lp ([patterns patterns] [ls arg*] [acc '()])
              (match patterns
@@ -512,7 +534,10 @@
            (match type
              [bool #f]
              [count #f]
-             [(string ,help) help]
+             [(string ,help . ,def*)
+              (match def*
+                [() help]
+                [(,_) (string-append "[" help "]")])]
              [(list . ,patterns) (patterns->str patterns)])]
           [(or . ,hows) (ormap fmt hows)]
           [(and . ,hows) (join (remq #f (map fmt hows)) #\space)]

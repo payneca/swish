@@ -160,7 +160,7 @@ the complex number $0-1i$.
   Type & Result \\ \hline
   \code{bool} & \code{\#t} \\
   \code{count} & a positive integer \\
-  \code{(string \var{x})} & a string \\
+  \code{(string \var{x} \opt{\var{default}})} & a string or \var{default} \\
   \code{(list \var{x})} & a list of one item \\
   \code{(list \var{x} ...)} & a list of one or more items up to the
   next argument \\
@@ -297,6 +297,7 @@ around optional arguments. A \var{how} of \code{\#f} defaults to the
     \code{bool} & \code{\#f}\\
     \code{count} & \code{\#f}\\
     \code{(string \var{x})} & \str{x}\\
+    \code{(string \var{x} \var{default})} & \str{[x]}\\
     \code{(list \var{x})} & \str{x}\\
     \code{(list \var{x} ...)} & \str{x \etc}\\
     \code{(list . \var{x})} & \str{x \etc}\\
@@ -373,9 +374,9 @@ The following table summarizes the parser's behavior.
   \code{count}
   & none
   & an exact positive integer \\
-  \code{(string \var{x})}
-  & one
-  & a string \\
+  \code{(string \var{x} \opt{\var{default}})}
+  & zero or one depending on the next option
+  & a string or \var{default} \\
   \code{(list \var{$x_0$} \etc{} \var{$x_n$} ...)}
   & $n$ or more, up to the next option
   & a list of strings \\

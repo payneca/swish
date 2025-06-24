@@ -100,6 +100,8 @@
     "invalid counter in")
   (assert-syntax-error (cli-specs [name -s (string bad) ""])
     "invalid (string bad) in")
+  (assert-syntax-error (cli-specs [name -s (string "good" good bad) ""])
+    "invalid (string good good bad) in")
   (assert-syntax-error (cli-specs [name -s (list bad) ""])
     "invalid (list bad) in")
   (assert-syntax-error (cli-specs [name -i bool ""])
@@ -184,6 +186,8 @@
      (full (list (<arg-spec> copy valid [type 'counter])))]
     [#(bad-spec type (string bad) ,_)
      (full (list (<arg-spec> copy valid [type '(string bad)])))]
+    [#(bad-spec type (string "good" good bad) ,_)
+     (full (list (<arg-spec> copy valid [type '(string "good" good bad)])))]
     [#(bad-spec type (list bad) ,_)
      (full (list (<arg-spec> copy valid [type '(list bad)])))]
     [#(bad-spec help 12 ,_)
@@ -257,15 +261,18 @@
      [b -b bool "boolean"]
      [c -c count "count"]
      [l -l --list (list "l" ...) "list"]
-     [s -s --string (string "s") "string"]))
+     [s -s --string (string "s") "string"]
+     [o -o --opt (string "i" other) "optional"]
+     ))
   (define ls '("-b" "-c" "-s" "foo" "-l" "item1" "item2"))
 
-  (define usage "Usage: Whoa! [-bc] [-l l ...] [-s s]\n")
+  (define usage "Usage: Whoa! [-bc] [-l l ...] [-s s] [-o [i]]\n")
   (define options
     (join '("  -b                boolean"
             "  -c                count"
             "  -l, --list l ...  list"
-            "  -s, --string s    string\n")
+            "  -s, --string s    string"
+            "  -o, --opt [i]     optional\n")
       #\newline))
   (define help (string-append usage "\n" options))
 
@@ -389,6 +396,22 @@
   ;; The empty string is a valid value.
   (check (parse-command-line-arguments simple '(""))
     (make-ht [simple-value ""])))
+
+(mat named-optional ()
+  (define simple
+    (cli-specs
+     [jobs -j (string "<n>" max-cpus) "optional value"]))
+  (check (parse-command-line-arguments simple '("-j"))
+    (make-ht [jobs 'max-cpus]))
+  (check (parse-command-line-arguments simple '("-j" "2"))
+    (make-ht [jobs "2"]))
+  (check-error (catch (parse-command-line-arguments simple '("-j" "here" "-j" "there")))
+    "Exception: duplicate option -j.")
+  (check-error (catch (parse-command-line-arguments simple '("-j" "-j")))
+    "Exception: duplicate option -j.")
+  (check-error (catch (parse-command-line-arguments simple '("-jj")))
+    "Exception: duplicate option -j.")
+  )
 
 (mat named-list ()
   (define simple
@@ -592,6 +615,7 @@
     [#f (format-spec (<arg-spec> copy valid [type 'bool]) 'args)]
     [#f (format-spec (<arg-spec> copy valid [type 'count]) 'args)]
     ["<str>" (format-spec (<arg-spec> copy valid [type '(string "<str>")]) 'args)]
+    ["[<str>]" (format-spec (<arg-spec> copy valid [type '(string "<str>" "default")]) 'args)]
     ["" (format-spec (<arg-spec> copy valid [type '(list)]) 'args)]
     ["a" (format-spec (<arg-spec> copy valid [type '(list "a")]) 'args)]
     ["a b" (format-spec (<arg-spec> copy valid [type '(list "a" "b")]) 'args)]
@@ -650,6 +674,7 @@
   (usage "[-n <val>]" (cli-specs [named -n (string "<val>") "a value"]))
   (usage "[--named <val>]" (cli-specs [named --named (string "<val>") "a value"]))
   (usage "[-n <val>]" (cli-specs [named -n --named (string "<val>") "a value"]))
+  (usage "[-n [<val>]]" (cli-specs [named -n --named (string "<val>" "default") "a value"]))
 
   ;; named list one
   (usage "[-n <val>]" (cli-specs [named -n (list "<val>") "a value"]))
