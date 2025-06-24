@@ -47,6 +47,7 @@
     short     ; #f | character
     long      ; #f | string
     help      ; string describing argument
+    valid     ; #f | list of valid values
     conflicts ; list of names
     requires  ; list of names
     usage     ; list of [show|hide|fit] and [long|short|req|opt|<how>]
@@ -166,6 +167,10 @@
             (guard (valid-usage-how? x))
             rest]
            [,_ (append rest (list `(,def-req ,base-how)))]))))
+    (define (get-clause-list clause form)
+      (syntax-case clause ()
+        [(_ e ...) #'(e ...)]
+        [_ (syntax-error form "invalid clause")]))
 
     (define (spec-maker spec name short long type help optionals)
       (let ([type (syntax->datum type)])
@@ -173,7 +178,10 @@
           (syntax-error spec (format "invalid ~a in" type))))
       (let* ([short (get-short short)]
              [long (get-long long)]
-             [clauses (collect-clauses x optionals '(conflicts requires usage))]
+             [clauses (collect-clauses x optionals '(conflicts requires usage valid))]
+             ;; TODO this doesn't quite seem right
+             [valid-clause (find-clause 'valid clauses)]
+             [valid (and valid-clause #`(list #,@(get-clause-list valid-clause spec)))]
              [conflicts (or (find-clause 'conflicts clauses)
                             #'(conflicts '()))]
              [requires (or (find-clause 'requires clauses)
@@ -191,6 +199,7 @@
             [short #,short]
             [long #,long]
             [help #,help]
+            [valid #,valid]
             #,conflicts
             #,requires
             [usage '#,(datum->syntax #'_ full-usage)])))
@@ -446,6 +455,20 @@
             [else
              (take-pos arg rest pos-specs)])]))
 
+      (define (check-values ht)
+        (vector-for-each
+         (lambda (p)
+           (match p
+             [(,name . ,val)
+              (let ([s (hashtable-ref name->spec name #f)])
+                (<arg-spec> open s [valid])
+                (when valid
+                  (unless (member val valid)
+                    ;; TODO this message could use work
+                    (fail "~s is not one of ~{~s~^, ~}" val valid))))]))
+         (hashtable-cells ht))
+        ht)
+
       (define (check-conflicts ht)
         (vector-for-each
          (lambda (name)
@@ -480,7 +503,7 @@
          (hashtable-keys ht))
         ht)
 
-      (let ([ht (check-requires (check-conflicts (take-opt ls pos-specs)))])
+      (let ([ht (check-requires (check-conflicts (check-values (take-opt ls pos-specs))))])
         (case-lambda
          [() ht]
          [(name)

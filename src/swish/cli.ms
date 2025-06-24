@@ -125,6 +125,7 @@
                             [short c]
                             [long #f]
                             [help ""]
+                            [valid #f]
                             [conflicts '()]
                             [requires '()]
                             [usage '(fit (opt (and (or short long) args)))]))])
