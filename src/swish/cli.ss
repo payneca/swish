@@ -512,7 +512,7 @@
          (hashtable-keys ht))
         ht)
 
-      (let ([ht (check-requires (check-conflicts (check-values (take-opt ls pos-specs))))])
+      (let ([ht (check-values (check-requires (check-conflicts (take-opt ls pos-specs))))])
         (case-lambda
          [() ht]
          [(name)
