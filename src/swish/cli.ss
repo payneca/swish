@@ -456,16 +456,25 @@
              (take-pos arg rest pos-specs)])]))
 
       (define (check-values ht)
+        (define (check val valid)
+          (unless (member val valid)
+            ;; TODO this message could use work
+            (fail "~s is not one of ~{~s~^, ~}" val valid)))
         (vector-for-each
          (lambda (p)
            (match p
              [(,name . ,val)
               (let ([s (hashtable-ref name->spec name #f)])
-                (<arg-spec> open s [valid])
+                (<arg-spec> open s [type valid])
                 (when valid
-                  (unless (member val valid)
-                    ;; TODO this message could use work
-                    (fail "~s is not one of ~{~s~^, ~}" val valid))))]))
+                  (match type
+                    [bool (void)]
+                    [count (check val valid)]
+                    [(string ,_ . ,_) (check val valid)]
+                    [(list . ,_)
+                     (for-each
+                      (lambda (x) (check x valid))
+                      val)])))]))
          (hashtable-cells ht))
         ht)
 
