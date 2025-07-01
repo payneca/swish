@@ -126,6 +126,7 @@ example albeit incomplete.
   \opt{default-help}
   (\var{name} \opt{\var{short}} \opt{\var{long}} \var{type} \var{help}
     \opt{(default \var{default})}
+    \opt{(valid \var{valid} \etc)}
     \opt{(conflicts \var{conflicts})}
     \opt{(requires \var{requires})}
     \opt{(usage \opt{\var{visibility}} \opt{\var{how}})})
@@ -149,6 +150,8 @@ argument values and check constraints.
   \argrow{help}{a string or list of strings that describes the
     argument}
   \argrow{default}{a Scheme object}
+  \argrow{valid}{an input string or when using \code{count}, a
+    positive integer}
   \argrow{conflicts}{a list of \code{<arg-spec>} names}
   \argrow{requires}{a list of \code{<arg-spec>} names}
 \end{argtbl}
@@ -217,6 +220,10 @@ For options with \var{short} or \var{long} specified, \code{fit} and
 \var{default} is any Scheme object that will be returned when a string
 option is used but a subsequent value is not provided.
 
+Each \var{valid} value provided is a string or positive integer that
+is compared using \code{equal?}. The set of \var{valid} values must
+have at least 2 elements.
+
 \var{conflicts} is a list of specification names that prevent this
 argument from processing correctly. When multiple command-line
 arguments are specified that are in conflict, an exception is raised.
@@ -225,8 +232,8 @@ arguments are specified that are in conflict, an exception is raised.
 necessary for this argument to be processed correctly. Unless all the
 required command-line arguments are specified, an exception is raised.
 
-The \code{default}, \code{conflicts}, \code{requires}, and
-\code{usage} clauses may be specified in any order.
+The \code{default}, \code{valid}, \code{conflicts}, \code{requires},
+and \code{usage} clauses may be specified in any order.
 
 \defineentry{display-help}
 \begin{procedure}
@@ -401,6 +408,7 @@ accumulate parsing errors without necessarily generating exceptions.
   \argrow{long}{\code{\#f} $|$ a string}
   \argrow{help}{a string or list of strings describing argument}
   \argrow{default}{\code{\#f} $|$ a Scheme object}
+  \argrow{valid}{\code{\#f} $|$ a list of strings or positive integers}
   \argrow{conflicts}{a list of \code{<arg-spec>} names}
   \argrow{requires}{a list of \code{<arg-spec>} names}
   \argrow{usage}{a list containing one \var{visibility} symbol and a

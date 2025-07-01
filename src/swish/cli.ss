@@ -48,6 +48,7 @@
     long      ; #f | string
     help      ; string describing argument
     default   ; #f | scheme object
+    valid     ; #f | list of valid values
     conflicts ; list of names
     requires  ; list of names
     usage     ; list of [show|hide|fit] and [long|short|req|opt|<how>]
@@ -125,6 +126,22 @@
                        [(,how) (valid-usage-how? how)]
                        [,_ #f])))))]))
 
+  (define-syntax valid-valid?
+    (syntax-rules ()
+      [(_ type valid-expr)
+       (let ([valid valid-expr])
+         (or (eq? valid #f)
+             (and (list? valid)
+                  (> (length valid) 1)
+                  (match type
+                    [bool #f]
+                    [count
+                     (for-all (lambda (x) (and (integer? x) (positive? x))) valid)]
+                    [(string ,_)
+                     (for-all string? valid)]
+                    [(list . ,patterns)
+                     (for-all string? valid)]))))]))
+
   (define-syntax (cli-specs x)
 
     (define (syntax->string x)
@@ -172,6 +189,10 @@
             (guard (valid-usage-how? x))
             rest]
            [,_ (append rest (list `(,def-req ,base-how)))]))))
+    (define (get-clause-list clause form)
+      (syntax-case clause ()
+        [(_ e ...) #'(e ...)]
+        [_ (syntax-error form "invalid clause")]))
 
     (define (spec-maker spec name short long type help optionals)
       (let ([type (syntax->datum type)])
@@ -179,9 +200,11 @@
           (syntax-error spec (format "invalid ~a in" type))))
       (let* ([short (get-short short)]
              [long (get-long long)]
-             [clauses (collect-clauses x optionals '(default conflicts requires usage))]
+             [clauses (collect-clauses x optionals '(default valid conflicts requires usage))]
              [default (or (find-clause 'default clauses)
                           #'(default #f))]
+             [valid-clause (find-clause 'valid clauses)]
+             [valid (and valid-clause #`(list #,@(get-clause-list valid-clause spec)))]
              [conflicts (or (find-clause 'conflicts clauses)
                             #'(conflicts '()))]
              [requires (or (find-clause 'requires clauses)
@@ -200,6 +223,7 @@
             [long #,long]
             [help #,help]
             #,default
+            [valid #,valid]
             #,conflicts
             #,requires
             [usage '#,(datum->syntax #'_ full-usage)])))
@@ -243,7 +267,7 @@
          ls))
       (for-each
        (lambda (s)
-         (<arg-spec> open s [name type short long help usage default])
+         (<arg-spec> open s [name type short long help usage default valid])
          (unless (symbol? name) (bad-spec 'name name s))
          (unless (or (not short) (and (char? short) (valid-short-char? short)))
            (bad-spec 'short short s))
@@ -254,6 +278,8 @@
            (bad-spec 'default default s))
          (unless (or (string? help) (list? help)) (bad-spec 'help help s))
          (unless (valid-usage? usage) (bad-spec 'usage usage s))
+         (unless (valid-valid? type valid)
+           (bad-spec 'valid valid s))
          (hashtable-update! ht name
            (lambda (old)
              (when old (bad-spec 'duplicate-spec name s))
@@ -489,7 +515,29 @@
          (hashtable-keys ht))
         ht)
 
-      (let ([ht (check-requires (check-conflicts (take-opt ls pos-specs)))])
+      (define (check-valid-values ht)
+        (define (check val valid)
+          (unless (member val valid)
+            (fail (oxford-comma "~s is not one of ~{" "~s" " or " "~}") val valid)))
+        (vector-for-each
+         (lambda (p)
+           (match p
+             [(,name . ,val)
+              (let ([s (hashtable-ref name->spec name #f)])
+                (<arg-spec> open s [type valid])
+                (when valid
+                  (match type
+                    ;; bool is not a valid type at this point
+                    [count (check val valid)]
+                    [(string ,_) (check val valid)]
+                    [(list . ,_)
+                     (for-each
+                      (lambda (x) (check x valid))
+                      val)])))]))
+         (hashtable-cells ht))
+        ht)
+
+      (let ([ht (check-valid-values (check-requires (check-conflicts (take-opt ls pos-specs))))])
         (case-lambda
          [() ht]
          [(name)

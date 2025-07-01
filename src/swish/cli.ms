@@ -124,6 +124,7 @@
                             [long #f]
                             [help ""]
                             [default #f]
+                            [valid #f]
                             [conflicts '()]
                             [requires '()]
                             [usage '(fit (opt (and (or short long) args)))]))])
@@ -201,6 +202,24 @@
      (full (list (<arg-spec> copy good [usage '()])))]
     [#(bad-spec usage (flubber) ,_)
      (full (list (<arg-spec> copy good [usage '(flubber)])))]
+    [#(bad-spec valid 5 ,_)
+     (full (list (<arg-spec> copy good [valid 5])))]
+    [#(bad-spec valid (#t #f) ,_)
+     (full (list (<arg-spec> copy good [valid (list #t #f)])))]
+    [#(bad-spec valid 5 ,_)
+     (full (list (<arg-spec> copy good [type 'count] [valid 5])))]
+    [#(bad-spec valid (5.6) ,_)
+     (full (list (<arg-spec> copy good [type 'count] [valid (list 5.6)])))]
+    [#(bad-spec valid (0) ,_)
+     (full (list (<arg-spec> copy good [type 'count] [valid (list 0)])))]
+    [#(bad-spec valid () ,_)
+     (full (list (<arg-spec> copy good [type '(string "<>")] [valid '()])))]
+    [#(bad-spec valid 5 ,_)
+     (full (list (<arg-spec> copy good [type '(string "<>")] [valid 5])))]
+    [#(bad-spec valid (5) ,_)
+     (full (list (<arg-spec> copy good [type '(string "<>")] [valid (list 5)])))]
+    [#(bad-spec valid 5 ,_)
+     (full (list (<arg-spec> copy good [type '(list "<>")] [valid 5])))]
     [#(bad-spec conflicts 12 ,_)
      (full (list (<arg-spec> copy good [conflicts 12])))]
     [#(bad-spec conflicts ("flubber") ,_)
@@ -889,3 +908,32 @@
     (usage "[-abcdefghijklmno] [options]" specs 41)
     (usage "[-abcdefghijklmn] [options]" specs 40)
     (usage "[-abcdefghijklm] [options]" specs 39)))
+
+(mat valid ()
+  (define cli
+    (cli-specs
+     [optimize-level -o count "optimize-level"
+       (valid 1 2)]
+     [speed --speed (string "<speed>") "how fast?"
+       (valid "slow" "medium" "fast" "warp-speed")]
+     [scoops --scoop (list "<flav>" ...) "what flavors?"
+       (valid "chocolate" "mint" "peanut-butter" "vanilla")]))
+  (check (parse-command-line-arguments cli '("-o"))
+    (make-ht [optimize-level 1]))
+  (check (parse-command-line-arguments cli '("-oo"))
+    (make-ht [optimize-level 2]))
+  (check-error (catch (parse-command-line-arguments cli '("-ooo")))
+    "Exception: 3 is not one of 1 or 2.")
+  (check (parse-command-line-arguments cli '("--speed" "slow"))
+    (make-ht [speed "slow"]))
+  (check (parse-command-line-arguments cli '("--speed" "warp-speed"))
+    (make-ht [speed "warp-speed"]))
+  (check-error (catch (parse-command-line-arguments cli '("--speed" "lint")))
+    "Exception: \"lint\" is not one of \"slow\", \"medium\", \"fast\", or \"warp-speed\".")
+  (check (parse-command-line-arguments cli '("--scoop" "chocolate"))
+    (make-ht [scoops (list "chocolate")]))
+  (check (parse-command-line-arguments cli '("--scoop" "chocolate" "vanilla"))
+    (make-ht [scoops (list "chocolate" "vanilla")]))
+  (check-error (catch (parse-command-line-arguments cli '("--scoop" "broccoli")))
+    "Exception: \"broccoli\" is not one of \"chocolate\", \"mint\", \"peanut-butter\", or \"vanilla\".")
+  )
