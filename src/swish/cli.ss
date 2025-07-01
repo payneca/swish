@@ -47,6 +47,7 @@
     short     ; #f | character
     long      ; #f | string
     help      ; string describing argument
+    default   ; #f | scheme object
     conflicts ; list of names
     requires  ; list of names
     usage     ; list of [show|hide|fit] and [long|short|req|opt|<how>]
@@ -81,6 +82,16 @@
               [(,p . ,patterns) (guard (string? p)) (lp patterns)]
               [,_ #f]))]
          [,_ #f])]))
+
+  (define-syntax valid-default?
+    (syntax-rules ()
+      [(_ type default-expr)
+       (let ([default default-expr])
+         (match type
+           [bool (eq? default #f)]
+           [count (eq? default #f)]
+           [(string ,_) #t]
+           [(list . ,_) (eq? default #f)]))]))
 
   (define-syntax valid-usage-how?
     (syntax-rules ()
@@ -168,7 +179,9 @@
           (syntax-error spec (format "invalid ~a in" type))))
       (let* ([short (get-short short)]
              [long (get-long long)]
-             [clauses (collect-clauses x optionals '(conflicts requires usage))]
+             [clauses (collect-clauses x optionals '(default conflicts requires usage))]
+             [default (or (find-clause 'default clauses)
+                          #'(default #f))]
              [conflicts (or (find-clause 'conflicts clauses)
                             #'(conflicts '()))]
              [requires (or (find-clause 'requires clauses)
@@ -186,6 +199,7 @@
             [short #,short]
             [long #,long]
             [help #,help]
+            #,default
             #,conflicts
             #,requires
             [usage '#,(datum->syntax #'_ full-usage)])))
@@ -229,13 +243,15 @@
          ls))
       (for-each
        (lambda (s)
-         (<arg-spec> open s [name type short long help usage])
+         (<arg-spec> open s [name type short long help usage default])
          (unless (symbol? name) (bad-spec 'name name s))
          (unless (or (not short) (and (char? short) (valid-short-char? short)))
            (bad-spec 'short short s))
          (unless (or (not long) (string? long)) (bad-spec 'long long s))
          (unless (valid-type? type short long)
            (bad-spec 'type type s))
+         (unless (valid-default? type default)
+           (bad-spec 'default default s))
          (unless (or (string? help) (list? help)) (bad-spec 'help help s))
          (unless (valid-usage? usage) (bad-spec 'usage usage s))
          (hashtable-update! ht name
@@ -343,32 +359,47 @@
                    (take-opt ls pos-specs)]))])]))
 
       (define (take-named input arg* spec pos-specs)
-        (<arg-spec> open spec [name type])
+        (<arg-spec> open spec [name type default])
+        (define (set-value x)
+          (hashtable-update! ht name
+            (lambda (old)
+              (when old (fail "duplicate option ~a" input))
+              x)
+            #f))
         (match type
           [bool
-           (hashtable-update! ht name
-             (lambda (old)
-               (when old (fail "duplicate option ~a" input))
-               #t)
-             #f)
+           (set-value #t)
            (take-opt arg* pos-specs)]
           [count
            (hashtable-update! ht name (lambda (old) (+ old 1)) 0)
            (take-opt arg* pos-specs)]
           [(string ,_)
-           (match arg*
-             [(,arg . ,rest)
-              (guard (not (maybe-option? arg)))
-              (hashtable-update! ht name
-                (lambda (old)
-                  (when old (fail "duplicate option ~a" input))
-                  (or old arg))
-                #f)
-              (take-opt rest pos-specs)]
-             [,_
-              (fail "option expects value: ~a ~a" input
-                (format-spec spec 'args))
-              (take-opt arg* pos-specs)])]
+           (if (not default)
+               (match arg*
+                 [(,arg . ,rest)
+                  (guard (not (maybe-option? arg)))
+                  (hashtable-update! ht name
+                    (lambda (old)
+                      (when old (fail "duplicate option ~a" input))
+                      (or old arg))
+                    #f)
+                  (take-opt rest pos-specs)]
+                 [,_
+                  (fail "option expects value: ~a ~a" input
+                    (format-spec spec 'args))
+                  (take-opt arg* pos-specs)])
+               (match arg*
+                 [()
+                  (set-value default)
+                  (take-opt arg* pos-specs)]
+                 [(,arg . ,rest)
+                  (cond
+                   [(maybe-option? arg)
+                    (set-value default)
+                    (take-opt arg* pos-specs)]
+                   [else
+                    (set-value arg)
+                    (take-opt rest pos-specs)])]))]
           [(list . ,patterns)
            (let lp ([patterns patterns] [ls arg*] [acc '()])
              (match patterns
@@ -502,7 +533,7 @@
     (case-lambda
      [(spec) (format-spec spec #f)]
      [(spec how)
-      (<arg-spec> open spec [type short long usage])
+      (<arg-spec> open spec [type short long usage default])
       (partial-check-specs (list spec))
       (let fmt ([how (or how (usage->how usage))])
         (match how
@@ -512,7 +543,10 @@
            (match type
              [bool #f]
              [count #f]
-             [(string ,help) help]
+             [(string ,help)
+              (if default
+                  (format "[~a]" help)
+                  help)]
              [(list . ,patterns) (patterns->str patterns)])]
           [(or . ,hows) (ormap fmt hows)]
           [(and . ,hows) (join (remq #f (map fmt hows)) #\space)]

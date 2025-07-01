@@ -125,6 +125,7 @@ example albeit incomplete.
 (cli-specs
   \opt{default-help}
   (\var{name} \opt{\var{short}} \opt{\var{long}} \var{type} \var{help}
+    \opt{(default \var{default})}
     \opt{(conflicts \var{conflicts})}
     \opt{(requires \var{requires})}
     \opt{(usage \opt{\var{visibility}} \opt{\var{how}})})
@@ -147,6 +148,7 @@ argument values and check constraints.
   \argrow{type}{see Figure~\ref{fig:cli-types}}
   \argrow{help}{a string or list of strings that describes the
     argument}
+  \argrow{default}{a Scheme object}
   \argrow{conflicts}{a list of \code{<arg-spec>} names}
   \argrow{requires}{a list of \code{<arg-spec>} names}
 \end{argtbl}
@@ -212,6 +214,9 @@ For options with \var{short} or \var{long} specified, \code{fit} and
 \code{opt} are the defaults. For other options, \code{show} and
 \code{req} are the defaults.
 
+\var{default} is any Scheme object that will be returned when a string
+option is used but a subsequent value is not provided.
+
 \var{conflicts} is a list of specification names that prevent this
 argument from processing correctly. When multiple command-line
 arguments are specified that are in conflict, an exception is raised.
@@ -220,8 +225,8 @@ arguments are specified that are in conflict, an exception is raised.
 necessary for this argument to be processed correctly. Unless all the
 required command-line arguments are specified, an exception is raised.
 
-The \code{conflicts}, \code{requires}, and \code{usage} clauses may be
-specified in any order.
+The \code{default}, \code{conflicts}, \code{requires}, and
+\code{usage} clauses may be specified in any order.
 
 \defineentry{display-help}
 \begin{procedure}
@@ -375,7 +380,7 @@ The following table summarizes the parser's behavior.
   & an exact positive integer \\
   \code{(string \var{x})}
   & one
-  & a string \\
+  & a string or \var{default}\\
   \code{(list \var{$x_0$} \etc{} \var{$x_n$} ...)}
   & $n$ or more, up to the next option
   & a list of strings \\
@@ -393,8 +398,9 @@ accumulate parsing errors without necessarily generating exceptions.
   \argrow{name}{a symbol to use as the key of the output hash table}
   \argrow{type}{see Figure~\ref{fig:cli-types}}
   \argrow{short}{\code{\#f} $|$ a character}
-  \argrow{long}{\code{\#f} $|$ a string }
+  \argrow{long}{\code{\#f} $|$ a string}
   \argrow{help}{a string or list of strings describing argument}
+  \argrow{default}{\code{\#f} $|$ a Scheme object}
   \argrow{conflicts}{a list of \code{<arg-spec>} names}
   \argrow{requires}{a list of \code{<arg-spec>} names}
   \argrow{usage}{a list containing one \var{visibility} symbol and a
