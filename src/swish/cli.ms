@@ -220,6 +220,8 @@
      (full (list (<arg-spec> copy good [type '(string "<>")] [valid (list 5)])))]
     [#(bad-spec valid 5 ,_)
      (full (list (<arg-spec> copy good [type '(list "<>")] [valid 5])))]
+    [#(bad-spec valid 5 ,_)
+     (full (list (<arg-spec> copy good [type '(subcommand "<>")] [valid 5])))]
     [#(bad-spec conflicts 12 ,_)
      (full (list (<arg-spec> copy good [conflicts 12])))]
     [#(bad-spec conflicts ("flubber") ,_)
