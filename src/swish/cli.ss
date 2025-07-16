@@ -34,6 +34,7 @@
    )
   (import
    (chezscheme)
+   (swish dsm)
    (swish erlang)
    (swish errors)
    (swish meta)
@@ -55,9 +56,8 @@
     )
 
   (define (positional? s)
-    (match s
-      [`(<arg-spec> [short #f] [long #f]) #t]
-      [,_ #f]))
+    (<arg-spec> open s [short long])
+    (and (not short) (not long)))
 
   (define-syntax valid-short-char?
     (syntax-rules ()
@@ -252,15 +252,22 @@
   (define (bad-spec who what spec)
     (throw `#(bad-spec ,who ,what ,spec)))
 
-  (define (check-specs specs) (check-specs-help specs #t))
-  (define (partial-check-specs specs) (check-specs-help specs #f))
+  (define (check-specs specs) (check-specs-help (make-eq-hashtable) specs #t))
+  (define (partial-check-specs specs) (check-specs-help #f specs #f))
 
-  (define (check-specs-help specs check-missing?)
-    (let ([ht (make-hashtable symbol-hash eq?)])
+  (define-tuple <checked>
+    name->spec
+    option->spec
+    pos-specs
+    )
+
+  (define (check-specs-help pt specs check-missing?)
+    (let ([name->spec (make-hashtable symbol-hash eq?)]
+          [option->spec (make-hashtable equal-hash equal?)])
       (define (specs-missing ls)
         (fold-right
          (lambda (x acc)
-           (if (hashtable-ref ht x #f)
+           (if (hashtable-ref name->spec x #f)
                acc
                (cons x acc)))
          '()
@@ -280,12 +287,25 @@
          (unless (valid-usage? usage) (bad-spec 'usage usage s))
          (unless (valid-valid? type valid)
            (bad-spec 'valid valid s))
-         (hashtable-update! ht name
+         (hashtable-update! name->spec name
            (lambda (old)
              (when old (bad-spec 'duplicate-spec name s))
              s)
            #f)
-         )
+         (when short
+           (hashtable-update! option->spec short
+             (lambda (old)
+               (when old
+                 (bad-spec 'duplicate-option-spec short s))
+               s)
+             #f))
+         (when long
+           (hashtable-update! option->spec long
+             (lambda (old)
+               (when old
+                 (bad-spec 'duplicate-option-spec long s))
+               s)
+             #f)))
        specs)
       (for-each
        (lambda (s)
@@ -303,247 +323,254 @@
              (unless (null? missing)
                (bad-spec 'missing-specs missing s)))))
        specs)
-      ht))
+      (let ([c (<checked> make
+                 [name->spec name->spec]
+                 [option->spec option->spec]
+                 [pos-specs (filter positional? specs)])])
+        (when pt
+          (eq-hashtable-set! pt specs c))
+        c)))
+
+  (define-syntactic-monad P
+    result
+    name->spec
+    option->spec
+    pos-specs
+    fail
+    init-args
+    specs->checked
+    )
+
+  (define (shortish? x)
+    (and
+     (char=? (string-ref x 0) #\-)
+     (not (string=? x "-"))
+     (not (char-numeric? (string-ref x 1)))))
+
+  (define (maybe-option? arg)
+    (or (starts-with? arg "--")
+        (and (> (string-length arg) 0) (shortish? arg))))
+
+  (define (update-list ht name value)
+    (hashtable-update! ht name
+      (lambda (old) (append old value))
+      '()))
+
+  (define (check-conflicts ht name->spec fail)
+    (vector-for-each
+     (lambda (name)
+       (let* ([s (hashtable-ref name->spec name #f)]
+              [ls (filter
+                   (lambda (x) (hashtable-ref ht x #f))
+                   (<arg-spec> conflicts s))])
+         (unless (null? ls)
+           (fail "~a conflicts with ~{~a~^, ~}"
+             (describe-spec (hashtable-ref name->spec name #f))
+             (map
+              (lambda (x)
+                (describe-spec (hashtable-ref name->spec x #f)))
+              ls)))))
+     (hashtable-keys ht))
+    ht)
+
+  (define (check-requires ht name->spec fail)
+    (vector-for-each
+     (lambda (name)
+       (let* ([s (hashtable-ref name->spec name #f)]
+              [ls (filter
+                   (lambda (x) (not (hashtable-ref ht x #f)))
+                   (<arg-spec> requires s))])
+         (unless (null? ls)
+           (fail "~a requires ~{~a~^, ~}"
+             (describe-spec (hashtable-ref name->spec name #f))
+             (map
+              (lambda (x)
+                (describe-spec (hashtable-ref name->spec x #f)))
+              ls)))))
+     (hashtable-keys ht))
+    ht)
+
+  (define (check-valid-values ht name->spec fail)
+    (define (check val valid)
+      (unless (member val valid)
+        (fail (oxford-comma "~s is not one of ~{" "~s" " or " "~}") val valid)))
+    (vector-for-each
+     (lambda (p)
+       (match p
+         [(,name . ,val)
+          (let ([s (hashtable-ref name->spec name #f)])
+            (<arg-spec> open s [type valid])
+            (when valid
+              (match type
+                ;; bool is not a valid type at this point
+                [count (check val valid)]
+                [(string ,_) (check val valid)]
+                [(list . ,_)
+                 (for-each
+                  (lambda (x) (check x valid))
+                  val)])))]))
+     (hashtable-cells ht))
+    ht)
+
+  ;; TODO make-result and checkers seem like good candidates for dsm
+  (define (make-result ht name->spec fail)
+    (check-conflicts ht name->spec fail)
+    (check-requires ht name->spec fail)
+    (check-valid-values ht name->spec fail)
+    (case-lambda
+     [() ht]
+     [(name)
+      (unless (hashtable-ref name->spec name #f)
+        (throw `#(no-spec-with-name ,name)))
+      (hashtable-ref ht name #f)]))
+
+  (P define (lookup-option x)
+    (hashtable-ref option->spec x #f))
+
+  (P define (done)
+    ;; TODO could inline and eliminate
+    result)
+
+  (P define (take-pos arg arg*)
+    (match pos-specs
+      [()
+       (fail "too many arguments: ~s" init-args)
+       (P take-opt () arg*)]
+      [(,[spec <= `(<arg-spec> ,name ,type)] . ,pos-specs)
+       (match type
+         [(string ,_)
+          (hashtable-set! result name arg)
+          (P take-opt () arg*)]
+         [(list . ,patterns)
+          (let lp ([patterns patterns] [ls (cons arg arg*)] [acc '()])
+            (match patterns
+              [()
+               (update-list result name (reverse acc))
+               (P take-opt () ls)]
+              [,p                       ; rest
+               (guard (string? p))
+               (update-list result name (append (reverse acc) ls))
+               (P take-opt () '())]
+              [(,p ...)                 ; many
+               (if (and (pair? ls) (not (maybe-option? (car ls))))
+                   (lp patterns (cdr ls) (cons (car ls) acc))
+                   (lp '() ls acc))]
+              [(,p . ,patterns)         ; one
+               (guard (and (pair? ls) (not (maybe-option? (car ls)))))
+               (lp patterns (cdr ls) (cons (car ls) acc))]
+              [,_
+               (fail "option expects value: ~a" (format-spec spec 'args))
+               (P take-opt () ls)]))])]))
+
+  (P define (take-named arg arg* spec)
+    (<arg-spec> open spec [name type default])
+    (define (set-value x)
+      (hashtable-update! result name
+        (lambda (old)
+          (when old (fail "duplicate option ~a" arg))
+          x)
+        #f))
+    (match type
+      [bool
+       (set-value #t)
+       (P take-opt () arg*)]
+      [count
+       (hashtable-update! result name (lambda (old) (+ old 1)) 0)
+       (P take-opt () arg*)]
+      [(string ,_)
+       (if (not default)
+           (match arg*
+             [(,arg . ,rest)
+              (guard (not (maybe-option? arg)))
+              (set-value arg)
+              (P take-opt () rest)]
+             [,_
+              (fail "option expects value: ~a ~a" arg
+                (format-spec spec 'args))
+              (P take-opt () arg*)])
+           (match arg*
+             [()
+              (set-value default)
+              (P take-opt () arg*)]
+             [(,arg . ,rest)
+              (cond
+               [(maybe-option? arg)
+                (set-value default)
+                (P take-opt () arg*)]
+               [else
+                (set-value arg)
+                (P take-opt () rest)])]))]
+      [(list . ,patterns)
+       (let lp ([patterns patterns] [ls arg*] [acc '()])
+         (match patterns
+           [()
+            (update-list result name (reverse acc))
+            (P take-opt () ls)]
+           [,p                          ; rest
+            (guard (string? p))
+            (update-list result name (append (reverse acc) ls))
+            (P take-opt () '())]
+           [(,p ...)                    ; many
+            (if (and (pair? ls) (not (maybe-option? (car ls))))
+                (lp patterns (cdr ls) (cons (car ls) acc))
+                (lp '() ls acc))]
+           [(,p . ,patterns)            ; one
+            (guard (and (pair? ls) (not (maybe-option? (car ls)))))
+            (lp patterns (cdr ls) (cons (car ls) acc))]
+           [,_
+            (fail "option expects value: ~a ~a" arg
+              (format-spec spec 'args))
+            (P take-opt () ls)]))]))
+
+  (P define (take-opt arg*)
+    (match arg*
+      [() (P done)]
+      [(,arg . ,rest)
+       (cond
+        [(string=? arg "")
+         (P take-pos () arg rest)]
+        [(starts-with? arg "--")
+         (let ([larg (substring arg 2 (string-length arg))])
+           (cond
+            [(P lookup-option () larg) =>
+             (lambda (s)
+               (P take-named () arg rest s))]
+            [else
+             (fail "unexpected ~a" arg)
+             (P take-opt () rest)]))]
+        [(shortish? arg)
+         (cond
+          [(> (string-length arg) 2)
+           (P take-opt ()
+             (append (map (lambda (c) (format "-~a" c))
+                       (string->list (substring arg 1 (string-length arg))))
+               rest))]
+          [(P lookup-option () (string-ref arg 1)) =>
+           (lambda (s)
+             (P take-named () arg rest s))]
+          [else
+           (fail "unexpected ~a" arg)
+           (P take-opt () rest)])]
+        [else
+         (P take-pos () arg rest)])]))
 
   (define (parse-arguments specs ls fail)
-    (let* ([name->spec (check-specs specs)] ; name -> <arg-spec>
-           [option->spec                    ; short/long -> <arg-spec>
-            (let ([ht (make-hashtable equal-hash equal?)])
-              (for-each
-               (lambda (s)
-                 (<arg-spec> open s [short long])
-                 (when short
-                   (hashtable-update! ht short
-                     (lambda (old)
-                       (when old
-                         (bad-spec 'duplicate-option-spec short s))
-                       s)
-                     #f))
-                 (when long
-                   (hashtable-update! ht long
-                     (lambda (old)
-                       (when old
-                         (bad-spec 'duplicate-option-spec long s))
-                       s)
-                     #f)))
-               specs)
-              ht)]
-           [pos-specs (filter
-                       (lambda (s)
-                         (<arg-spec> open s [short long])
-                         (and (not short) (not long)))
-                       specs)])
-      (define (lookup-option x)
-        (hashtable-ref option->spec x #f))
-
-      (define (shortish? x)
-        (and
-         (char=? (string-ref x 0) #\-)
-         (not (string=? x "-"))
-         (not (char-numeric? (string-ref x 1)))))
-
-      (define (maybe-option? arg)
-        (or (starts-with? arg "--")
-            (and (> (string-length arg) 0) (shortish? arg))))
-
-      (define ht (make-hashtable symbol-hash eq?))
-
-      (define (update-list ht name value)
-        (hashtable-update! ht name
-          (lambda (old) (append old value))
-          '()))
-
-      (define (take-pos arg arg* pos-specs)
-        (match pos-specs
-          [()
-           (fail "too many arguments: ~s" ls)
-           (take-opt arg* pos-specs)]
-          [(,[spec <= `(<arg-spec> ,name ,type)] . ,pos-specs)
-           (match type
-             [(string ,_)
-              (hashtable-set! ht name arg)
-              (take-opt arg* pos-specs)]
-             [(list . ,patterns)
-              (let lp ([patterns patterns] [ls (cons arg arg*)] [acc '()])
-                (match patterns
-                  [()
-                   (update-list ht name (reverse acc))
-                   (take-opt ls pos-specs)]
-                  [,p                   ; rest
-                   (guard (string? p))
-                   (update-list ht name (append (reverse acc) ls))
-                   (take-opt '() pos-specs)]
-                  [(,p ...)             ; many
-                   (if (and (pair? ls) (not (maybe-option? (car ls))))
-                       (lp patterns (cdr ls) (cons (car ls) acc))
-                       (lp '() ls acc))]
-                  [(,p . ,patterns)     ; one
-                   (guard (and (pair? ls) (not (maybe-option? (car ls)))))
-                   (lp patterns (cdr ls) (cons (car ls) acc))]
-                  [,_
-                   (fail "option expects value: ~a" (format-spec spec 'args))
-                   (take-opt ls pos-specs)]))])]))
-
-      (define (take-named input arg* spec pos-specs)
-        (<arg-spec> open spec [name type default])
-        (define (set-value x)
-          (hashtable-update! ht name
-            (lambda (old)
-              (when old (fail "duplicate option ~a" input))
-              x)
-            #f))
-        (match type
-          [bool
-           (set-value #t)
-           (take-opt arg* pos-specs)]
-          [count
-           (hashtable-update! ht name (lambda (old) (+ old 1)) 0)
-           (take-opt arg* pos-specs)]
-          [(string ,_)
-           (if (not default)
-               (match arg*
-                 [(,arg . ,rest)
-                  (guard (not (maybe-option? arg)))
-                  (hashtable-update! ht name
-                    (lambda (old)
-                      (when old (fail "duplicate option ~a" input))
-                      (or old arg))
-                    #f)
-                  (take-opt rest pos-specs)]
-                 [,_
-                  (fail "option expects value: ~a ~a" input
-                    (format-spec spec 'args))
-                  (take-opt arg* pos-specs)])
-               (match arg*
-                 [()
-                  (set-value default)
-                  (take-opt arg* pos-specs)]
-                 [(,arg . ,rest)
-                  (cond
-                   [(maybe-option? arg)
-                    (set-value default)
-                    (take-opt arg* pos-specs)]
-                   [else
-                    (set-value arg)
-                    (take-opt rest pos-specs)])]))]
-          [(list . ,patterns)
-           (let lp ([patterns patterns] [ls arg*] [acc '()])
-             (match patterns
-               [()
-                (update-list ht name (reverse acc))
-                (take-opt ls pos-specs)]
-               [,p                      ; rest
-                (guard (string? p))
-                (update-list ht name (append (reverse acc) ls))
-                (take-opt '() pos-specs)]
-               [(,p ...)                ; many
-                (if (and (pair? ls) (not (maybe-option? (car ls))))
-                    (lp patterns (cdr ls) (cons (car ls) acc))
-                    (lp '() ls acc))]
-               [(,p . ,patterns)        ; one
-                (guard (and (pair? ls) (not (maybe-option? (car ls)))))
-                (lp patterns (cdr ls) (cons (car ls) acc))]
-               [,_
-                (fail "option expects value: ~a ~a" input
-                  (format-spec spec 'args))
-                (take-opt ls pos-specs)]))]))
-
-      (define (take-opt ls pos-specs)
-        (match ls
-          [() ht]
-          [(,arg . ,rest)
-           (cond
-            [(string=? arg "")
-             (take-pos arg rest pos-specs)]
-            [(starts-with? arg "--")
-             (let ([larg (substring arg 2 (string-length arg))])
-               (cond
-                [(lookup-option larg) =>
-                 (lambda (s)
-                   (take-named arg rest s pos-specs))]
-                [else
-                 (fail "unexpected ~a" arg)
-                 (take-opt rest pos-specs)]))]
-            [(shortish? arg)
-             (cond
-              [(> (string-length arg) 2)
-               (take-opt
-                (append (map (lambda (c) (format "-~a" c))
-                          (string->list (substring arg 1 (string-length arg))))
-                  rest)
-                pos-specs)]
-              [(lookup-option (string-ref arg 1)) =>
-               (lambda (s)
-                 (take-named arg rest s pos-specs))]
-              [else
-               (fail "unexpected ~a" arg)
-               (take-opt rest pos-specs)])]
-            [else
-             (take-pos arg rest pos-specs)])]))
-
-      (define (check-conflicts ht)
-        (vector-for-each
-         (lambda (name)
-           (let* ([s (hashtable-ref name->spec name #f)]
-                  [ls (filter
-                       (lambda (x) (hashtable-ref ht x #f))
-                       (<arg-spec> conflicts s))])
-             (unless (null? ls)
-               (fail "~a conflicts with ~{~a~^, ~}"
-                 (describe-spec (hashtable-ref name->spec name #f))
-                 (map
-                  (lambda (x)
-                    (describe-spec (hashtable-ref name->spec x #f)))
-                  ls)))))
-         (hashtable-keys ht))
-        ht)
-
-      (define (check-requires ht)
-        (vector-for-each
-         (lambda (name)
-           (let* ([s (hashtable-ref name->spec name #f)]
-                  [ls (filter
-                       (lambda (x) (not (hashtable-ref ht x #f)))
-                       (<arg-spec> requires s))])
-             (unless (null? ls)
-               (fail "~a requires ~{~a~^, ~}"
-                 (describe-spec (hashtable-ref name->spec name #f))
-                 (map
-                  (lambda (x)
-                    (describe-spec (hashtable-ref name->spec x #f)))
-                  ls)))))
-         (hashtable-keys ht))
-        ht)
-
-      (define (check-valid-values ht)
-        (define (check val valid)
-          (unless (member val valid)
-            (fail (oxford-comma "~s is not one of ~{" "~s" " or " "~}") val valid)))
-        (vector-for-each
-         (lambda (p)
-           (match p
-             [(,name . ,val)
-              (let ([s (hashtable-ref name->spec name #f)])
-                (<arg-spec> open s [type valid])
-                (when valid
-                  (match type
-                    ;; bool is not a valid type at this point
-                    [count (check val valid)]
-                    [(string ,_) (check val valid)]
-                    [(list . ,_)
-                     (for-each
-                      (lambda (x) (check x valid))
-                      val)])))]))
-         (hashtable-cells ht))
-        ht)
-
-      (let ([ht (check-valid-values (check-requires (check-conflicts (take-opt ls pos-specs))))])
-        (case-lambda
-         [() ht]
-         [(name)
-          (unless (hashtable-ref name->spec name #f)
-            (throw `#(no-spec-with-name ,name)))
-          (hashtable-ref ht name #f)]))))
+    (define specs->checked (make-eq-hashtable))
+    (define result (make-hashtable symbol-hash eq?))
+    (match-define `(<checked> ,name->spec ,option->spec ,pos-specs)
+      (check-specs-help specs->checked specs #t))
+    (make-result
+     (P take-opt
+       ([result result]
+        [name->spec name->spec]
+        [option->spec option->spec]
+        [pos-specs pos-specs]
+        [fail fail]
+        [init-args ls]
+        [specs->checked specs->checked])
+       ls)
+     name->spec
+     fail))
 
   (define parse-command-line-arguments
     (case-lambda
