@@ -172,57 +172,57 @@
   (define (partial specs)
     (try-specs specs #t))
   (match-let*
-   ([(,valid) (cli-specs [name -s --long bool "help"])]
+   ([(,good) (cli-specs [name -s --long bool "help"])]
     [#(bad-spec name 12 ,_)
-     (full (list (<arg-spec> copy valid [name 12])))]
+     (full (list (<arg-spec> copy good [name 12])))]
     [#(bad-spec short 12 ,_)
-     (full (list (<arg-spec> copy valid [short 12])))]
+     (full (list (<arg-spec> copy good [short 12])))]
     [#(bad-spec long 12 ,_)
-     (full (list (<arg-spec> copy valid [long 12])))]
+     (full (list (<arg-spec> copy good [long 12])))]
     [#(bad-spec type boolean ,_)
-     (full (list (<arg-spec> copy valid [type 'boolean])))]
+     (full (list (<arg-spec> copy good [type 'boolean])))]
     [#(bad-spec type counter ,_)
-     (full (list (<arg-spec> copy valid [type 'counter])))]
+     (full (list (<arg-spec> copy good [type 'counter])))]
     [#(bad-spec type (string bad) ,_)
-     (full (list (<arg-spec> copy valid [type '(string bad)])))]
+     (full (list (<arg-spec> copy good [type '(string bad)])))]
     [#(bad-spec type (list bad) ,_)
-     (full (list (<arg-spec> copy valid [type '(list bad)])))]
+     (full (list (<arg-spec> copy good [type '(list bad)])))]
     [#(bad-spec default #t ,_)
-     (full (list (<arg-spec> copy valid [type 'bool] [default #t])))]
+     (full (list (<arg-spec> copy good [type 'bool] [default #t])))]
     [#(bad-spec default 5 ,_)
-     (full (list (<arg-spec> copy valid [type 'count] [default 5])))]
+     (full (list (<arg-spec> copy good [type 'count] [default 5])))]
     [#(bad-spec default (1 2 3) ,_)
-     (full (list (<arg-spec> copy valid [type '(list "foo")] [default (list 1 2 3)])))]
+     (full (list (<arg-spec> copy good [type '(list "foo")] [default (list 1 2 3)])))]
     [#(bad-spec help 12 ,_)
-     (full (list (<arg-spec> copy valid [help 12])))]
+     (full (list (<arg-spec> copy good [help 12])))]
     [#(bad-spec usage 12 ,_)
-     (full (list (<arg-spec> copy valid [usage 12])))]
+     (full (list (<arg-spec> copy good [usage 12])))]
     [#(bad-spec usage () ,_)
-     (full (list (<arg-spec> copy valid [usage '()])))]
+     (full (list (<arg-spec> copy good [usage '()])))]
     [#(bad-spec usage (flubber) ,_)
-     (full (list (<arg-spec> copy valid [usage '(flubber)])))]
+     (full (list (<arg-spec> copy good [usage '(flubber)])))]
     [#(bad-spec conflicts 12 ,_)
-     (full (list (<arg-spec> copy valid [conflicts 12])))]
+     (full (list (<arg-spec> copy good [conflicts 12])))]
     [#(bad-spec conflicts ("flubber") ,_)
-     (full (list (<arg-spec> copy valid [conflicts '("flubber")])))]
+     (full (list (<arg-spec> copy good [conflicts '("flubber")])))]
     [#(bad-spec requires 12 ,_)
-     (full (list (<arg-spec> copy valid [requires 12])))]
+     (full (list (<arg-spec> copy good [requires 12])))]
     [#(bad-spec requires ("flubber") ,_)
-     (full (list (<arg-spec> copy valid [requires '("flubber")])))]
+     (full (list (<arg-spec> copy good [requires '("flubber")])))]
     [#(bad-spec duplicate-spec name ,_)
-     (full (list valid (<arg-spec> copy valid [short #\a])))]
+     (full (list good (<arg-spec> copy good [short #\a])))]
     [#(bad-spec missing-specs (does-not-exist) ,_)
-     (partial (list (<arg-spec> copy valid [requires '(does-not-exist)])))]
+     (partial (list (<arg-spec> copy good [requires '(does-not-exist)])))]
     [#(bad-spec missing-specs (does-not-exist) ,_)
-     (partial (list (<arg-spec> copy valid [conflicts '(does-not-exist)])))]
+     (partial (list (<arg-spec> copy good [conflicts '(does-not-exist)])))]
     ;; Function Specific
     [#(EXIT #(bad-spec duplicate-option-spec #\s ,_))
      (catch (parse-command-line-arguments
-             (list valid (<arg-spec> copy valid [name 'name2]))
+             (list good (<arg-spec> copy good [name 'name2]))
              '()))]
     [#(EXIT #(bad-spec duplicate-option-spec "long" ,_))
      (catch (parse-command-line-arguments
-             (list valid (<arg-spec> copy valid [name 'name2] [short #\t]))
+             (list good (<arg-spec> copy good [name 'name2] [short #\t]))
              '()))])
    'ok))
 
@@ -612,23 +612,23 @@
 
 (mat format-spec ()
   (match-let*
-   ([(,valid) (cli-specs [name -s --long bool "help"])]
-    ["-s" (format-spec valid 'short)]
-    ["--long" (format-spec valid 'long)]
-    [#f (format-spec (<arg-spec> copy valid [type 'bool]) 'args)]
-    [#f (format-spec (<arg-spec> copy valid [type 'count]) 'args)]
-    ["<str>" (format-spec (<arg-spec> copy valid [type '(string "<str>")]) 'args)]
-    ["[<str>]" (format-spec (<arg-spec> copy valid [type '(string "<str>")] [default "default"]) 'args)]
-    ["" (format-spec (<arg-spec> copy valid [type '(list)]) 'args)]
-    ["a" (format-spec (<arg-spec> copy valid [type '(list "a")]) 'args)]
-    ["a b" (format-spec (<arg-spec> copy valid [type '(list "a" "b")]) 'args)]
-    ["a b ..." (format-spec (<arg-spec> copy valid [type '(list "a" "b" ...)]) 'args)]
-    ["a b ..." (format-spec (<arg-spec> copy valid [type '(list "a" . "b")]) 'args)]
-    ["-s" (format-spec valid '(or short long))]
-    ["--long" (format-spec valid '(or long short))]
-    ["-s --long" (format-spec valid '(and short long))]
-    ["[-s]" (format-spec valid '(opt short))]
-    ["[--long]" (format-spec valid '(opt long))]
+   ([(,good) (cli-specs [name -s --long bool "help"])]
+    ["-s" (format-spec good 'short)]
+    ["--long" (format-spec good 'long)]
+    [#f (format-spec (<arg-spec> copy good [type 'bool]) 'args)]
+    [#f (format-spec (<arg-spec> copy good [type 'count]) 'args)]
+    ["<str>" (format-spec (<arg-spec> copy good [type '(string "<str>")]) 'args)]
+    ["[<str>]" (format-spec (<arg-spec> copy good [type '(string "<str>")] [default "default"]) 'args)]
+    ["" (format-spec (<arg-spec> copy good [type '(list)]) 'args)]
+    ["a" (format-spec (<arg-spec> copy good [type '(list "a")]) 'args)]
+    ["a b" (format-spec (<arg-spec> copy good [type '(list "a" "b")]) 'args)]
+    ["a b ..." (format-spec (<arg-spec> copy good [type '(list "a" "b" ...)]) 'args)]
+    ["a b ..." (format-spec (<arg-spec> copy good [type '(list "a" . "b")]) 'args)]
+    ["-s" (format-spec good '(or short long))]
+    ["--long" (format-spec good '(or long short))]
+    ["-s --long" (format-spec good '(and short long))]
+    ["[-s]" (format-spec good '(opt short))]
+    ["[--long]" (format-spec good '(opt long))]
 
     [(,req) (cli-specs [name -s --long bool "help" (usage (req short))])]
     ["-s" (format-spec req)]
@@ -638,7 +638,7 @@
     ["[-s]" (format-spec opt)]
     [(,opt) (cli-specs [name -s --long bool "help" (usage (opt long))])]
     ["[--long]" (format-spec opt)]
-    ["[-s]" (format-spec valid #f)]
+    ["[-s]" (format-spec good #f)]
     )
    'ok))
 
