@@ -23,7 +23,9 @@
 
 (library (swish cli)
   (export
+   <arg-choice>
    <arg-spec>
+   cli-choice
    cli-specs
    display-help
    display-options
@@ -50,9 +52,15 @@
     help      ; string describing argument
     default   ; #f | scheme object
     valid     ; #f | list of valid values
+    specs     ; #f | list of <arg-spec> | list of <arg-choice>
     conflicts ; list of names
     requires  ; list of names
     usage     ; list of [show|hide|fit] and [long|short|req|opt|<how>]
+    )
+
+  (define-tuple <arg-choice>
+    value                               ; string | positive integer
+    specs                               ; list of <arg-spec>
     )
 
   (define (positional? s)
@@ -200,11 +208,13 @@
           (syntax-error spec (format "invalid ~a in" type))))
       (let* ([short (get-short short)]
              [long (get-long long)]
-             [clauses (collect-clauses x optionals '(default valid conflicts requires usage))]
+             [clauses (collect-clauses x optionals '(default valid specs conflicts requires usage))]
              [default (or (find-clause 'default clauses)
                           #'(default #f))]
              [valid-clause (find-clause 'valid clauses)]
              [valid (and valid-clause #`(list #,@(get-clause-list valid-clause spec)))]
+             [specs-clause (find-clause 'specs clauses)]
+             [specs (and specs-clause #`(begin #,@(get-clause-list specs-clause spec)))]
              [conflicts (or (find-clause 'conflicts clauses)
                             #'(conflicts '()))]
              [requires (or (find-clause 'requires clauses)
@@ -224,6 +234,7 @@
             [help #,help]
             #,default
             [valid #,valid]
+            [specs #,specs]
             #,conflicts
             #,requires
             [usage '#,(datum->syntax #'_ full-usage)])))
@@ -248,6 +259,15 @@
     (syntax-case x ()
       [(_ spec ...)
        #`(list #,@(map translate #'(spec ...)))]))
+
+  (define-syntax cli-choice
+    (syntax-rules ()
+      [(_ [$value $specs] ...)
+       (list
+        (<arg-choice> make
+          [value $value]
+          [specs $specs])
+        ...)]))
 
   (define (bad-spec who what spec)
     (throw `#(bad-spec ,who ,what ,spec)))
@@ -322,6 +342,28 @@
            (let ([missing (specs-missing requires)])
              (unless (null? missing)
                (bad-spec 'missing-specs missing s)))))
+       specs)
+      (for-each
+       (lambda (s)
+         (<arg-spec> open s [specs])
+         (when specs
+           (cond
+            [(andmap (<arg-spec> is?) specs)
+             (check-specs-help pt specs check-missing?)]
+            [(andmap
+              (lambda (c)
+                (match c
+                  [`(<arg-choice> ,value)
+                   (or (string? value)
+                       (and (integer? value) (positive? value)))]
+                  [,_ #f]))
+              specs)
+             (for-each
+              (lambda (c)
+                (check-specs-help pt (<arg-choice> specs c) check-missing?))
+              specs)]
+            [else
+             (bad-spec 'specs specs s)])))
        specs)
       (let ([c (<checked> make
                  [name->spec name->spec]
@@ -440,7 +482,7 @@
        (match type
          [(string ,_)
           (hashtable-set! result name arg)
-          (P take-opt () arg*)]
+          (P advance () arg arg* spec arg)]
          [(list . ,patterns)
           (let lp ([patterns patterns] [ls (cons arg arg*)] [acc '()])
             (match patterns
@@ -473,17 +515,19 @@
     (match type
       [bool
        (set-value #t)
-       (P take-opt () arg*)]
+       (P advance () arg arg* spec #t)]
       [count
-       (hashtable-update! result name (lambda (old) (+ old 1)) 0)
-       (P take-opt () arg*)]
+       (let* ([cell (hashtable-cell result name 0)]
+              [value (+ (cdr cell) 1)])
+         (set-cdr! cell value)
+         (P advance () arg arg* spec value))]
       [(string ,_)
        (if (not default)
            (match arg*
              [(,arg . ,rest)
               (guard (not (maybe-option? arg)))
               (set-value arg)
-              (P take-opt () rest)]
+              (P advance () arg rest spec arg)]
              [,_
               (fail "option expects value: ~a ~a" arg
                 (format-spec spec 'args))
@@ -491,15 +535,15 @@
            (match arg*
              [()
               (set-value default)
-              (P take-opt () arg*)]
+              (P advance () arg arg* spec default)]
              [(,arg . ,rest)
               (cond
                [(maybe-option? arg)
                 (set-value default)
-                (P take-opt () arg*)]
+                (P advance () arg arg* spec default)]
                [else
                 (set-value arg)
-                (P take-opt () rest)])]))]
+                (P advance () arg rest spec arg)])]))]
       [(list . ,patterns)
        (let lp ([patterns patterns] [ls arg*] [acc '()])
          (match patterns
@@ -521,6 +565,41 @@
             (fail "option expects value: ~a ~a" arg
               (format-spec spec 'args))
             (P take-opt () ls)]))]))
+
+  (P define (advance arg arg* spec value)
+    (<arg-spec> open spec [name specs])
+    (define (sub-specs specs)
+      (match (and specs (eq-hashtable-ref specs->checked specs #f))
+        [#f
+         (P take-opt () arg*)]
+        [`(<checked> ,name->spec ,option->spec ,pos-specs)
+         (let* ([sub (make-hashtable symbol-hash eq?)]
+                [r (make-result
+                    (P take-opt
+                      ([result sub]
+                       [name->spec name->spec]
+                       [option->spec option->spec]
+                       [pos-specs pos-specs])
+                      arg*)
+                    name->spec
+                    fail)])
+           (hashtable-set! result name (cons arg r))
+           (P done))]))
+    (cond
+     [(not specs)
+      (P take-opt () arg*)]
+     [(let lp ([specs specs])
+        (match specs
+          [() #f]
+          [(`(<arg-spec>) . ,_) #f]
+          [(`(<arg-choice> [value ,cvalue] [specs ,cspecs]) . ,rest)
+           (if (equal? cvalue value)
+               cspecs
+               (lp rest))])) =>
+      (lambda (specs)
+        (sub-specs specs))]
+     [else
+      (sub-specs specs)]))
 
   (P define (take-opt arg*)
     (match arg*

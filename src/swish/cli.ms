@@ -125,6 +125,7 @@
                             [help ""]
                             [default #f]
                             [valid #f]
+                            [specs #f]
                             [conflicts '()]
                             [requires '()]
                             [usage '(fit (opt (and (or short long) args)))]))])
