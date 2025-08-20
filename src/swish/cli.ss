@@ -567,10 +567,17 @@
             (P take-opt () ls)]))]))
 
   (P define (advance arg arg* spec value)
+    ;; TODO Should still call advance in the list cases; it might not
+    ;; make sense to have a arg-choice, but it might still make sense
+    ;; to have a specs list. There may be cases where choice makes
+    ;; sense too.
     (<arg-spec> open spec [name specs])
     (define (sub-specs specs)
       (match (and specs (eq-hashtable-ref specs->checked specs #f))
         [#f
+         ;; TODO need to think harder. This may be an impossible
+         ;; case. If so, this code can be simplified to a match-let*
+         ;; or match-define
          (P take-opt () arg*)]
         [`(<checked> ,name->spec ,option->spec ,pos-specs)
          (let* ([sub (make-hashtable symbol-hash eq?)]
@@ -588,18 +595,19 @@
     (cond
      [(not specs)
       (P take-opt () arg*)]
-     [(let lp ([specs specs])
-        (match specs
-          [() #f]
-          [(`(<arg-spec>) . ,_) #f]
-          [(`(<arg-choice> [value ,cvalue] [specs ,cspecs]) . ,rest)
-           (if (equal? cvalue value)
-               cspecs
-               (lp rest))])) =>
-      (lambda (specs)
-        (sub-specs specs))]
+     [(null? specs)
+      (P take-opt () arg*)]
+     [(<arg-spec> is? (car specs))
+      (sub-specs specs)]
+     [(find
+       (lambda (c)
+         (equal? value (<arg-choice> value c)))
+       specs) =>
+      (lambda (c)
+        (sub-specs (<arg-choice> specs c)))]
      [else
-      (sub-specs specs)]))
+      (fail "~s is not a command" arg)
+      (P take-opt () (cons arg arg*))]))
 
   (P define (take-opt arg*)
     (match arg*
