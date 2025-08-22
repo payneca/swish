@@ -60,6 +60,7 @@
 
   (define-tuple <arg-choice>
     value                               ; string | positive integer
+    help                                ; string describing choice
     specs                               ; list of <arg-spec>
     )
 
@@ -262,10 +263,11 @@
 
   (define-syntax cli-choice
     (syntax-rules ()
-      [(_ [$value $specs] ...)
+      [(_ [$value $help $specs] ...)
        (list
         (<arg-choice> make
           [value $value]
+          [help $help]
           [specs $specs])
         ...)]))
 
@@ -360,7 +362,9 @@
               specs)
              (for-each
               (lambda (c)
-                (check-specs-help pt (<arg-choice> specs c) check-missing?))
+                (<arg-choice> open c [help specs])
+                (unless (or (string? help) (list? help)) (bad-spec 'help help s))
+                (check-specs-help pt specs check-missing?))
               specs)]
             [else
              (bad-spec 'specs specs s)])))
