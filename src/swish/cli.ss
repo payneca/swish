@@ -740,9 +740,22 @@
           (bad-arg 'help-wrap-width x))
         x)))
 
-  (define (display-help-row s args op)
-    (define indent 20)
-    (define right-col-width (max 0 (- (help-wrap-width) indent)))
+  (define (display-row indent left right op)
+    (define middle 20)
+    (define right-col-width (max 0 (- (help-wrap-width) middle)))
+    (display-string (make-string indent #\space) op)
+    (display left op)
+    (let* ([llen (+ (string-length left) indent)]
+           [init-middle
+            (cond
+             [(< llen middle) (- middle llen)]
+             [else
+              (newline op)
+              middle])])
+      (wrap-text op right-col-width init-middle middle right)
+      (newline op)))
+
+  (define (display-help-row s args indent op)
     (let* ([left (help-left s)]
            [right (<arg-spec> help s)]
            [right (if (list? right)
@@ -755,17 +768,26 @@
                    [(pair? arg)
                     (format "~a ~a" right arg)]
                    [else right])])
-      (display-string "  " op)
-      (display left op)
-      (let* ([llen (+ (string-length left) 2)]
-             [init-indent
-              (cond
-               [(< llen indent) (- indent llen)]
-               [else
-                (newline op)
-                indent])])
-        (wrap-text op right-col-width init-indent indent right)
-        (newline op))))
+      (display-row indent left right op)))
+
+  (define (display-help-row+ s args indent op)
+    (display-help-row s args indent op)
+    (let ([specs (<arg-spec> specs s)])
+      (match specs
+        [#f (void)]
+        [() (void)]
+        [(`(<arg-spec>) . ,_)
+         (let-values ([(pos opt) (partition positional? specs)])
+           (display-options-internal opt pos args (+ indent 2) op))]
+        [(`(<arg-choice>) . ,_)
+         (let ([indent (+ indent 2)])
+           (for-each
+            (lambda (c)
+              (<arg-choice> open c [value help specs])
+              (display-row indent value help op)
+              (let-values ([(pos opt) (partition positional? specs)])
+                (display-options-internal opt pos args (+ indent 2) op)))
+            specs))])))
 
   (define (display-usage-internal prefix exe-name width in-opt pos op)
     (define (prepare s)
@@ -840,9 +862,9 @@
       (let-values ([(pos opt) (partition positional? specs)])
         (display-usage-internal prefix exe-name width opt pos op))]))
 
-  (define (display-options-internal opt pos args op)
-    (for-each (lambda (o) (display-help-row o args op)) opt)
-    (for-each (lambda (p) (display-help-row p args op)) pos))
+  (define (display-options-internal opt pos args indent op)
+    (for-each (lambda (o) (display-help-row+ o args indent op)) opt)
+    (for-each (lambda (p) (display-help-row+ p args indent op)) pos))
 
   (define (parsed-options? args) (or (not args) (hashtable? args)))
 
@@ -856,7 +878,7 @@
         [op output-port? textual-port?])
       (partial-check-specs specs)
       (let-values ([(pos opt) (partition positional? specs)])
-        (display-options-internal opt pos args op))]))
+        (display-options-internal opt pos args 2 op))]))
 
   (define display-help
     (case-lambda
@@ -874,6 +896,6 @@
         (display-usage-internal "Usage:" exe-name #f opt pos op)
         (when (or (pair? opt) (pair? pos))
           (newline op)
-          (display-options-internal opt pos args op)))]))
+          (display-options-internal opt pos args 2 op)))]))
 
   )
