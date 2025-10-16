@@ -594,6 +594,9 @@
                       arg*)
                     name->spec
                     fail)])
+           ;; TODO may prefer a tuple over cons -- to allow pattern
+           ;; matching w/ field names, and potentially extending the
+           ;; set of data that comes back.
            (hashtable-set! result name (cons arg r))
            (P done))]))
     (cond
