@@ -31,6 +31,7 @@
     (swish application)
     (swish base64)
     (swish cli)
+    (swish contrib)
     (swish db)
     (swish digest)
     (swish dsm)

@@ -604,6 +604,9 @@
   (lambda (srcdirs)
     (source-directories (append srcdirs (source-directories))))])
 
+;; TODO add an option to allow contribs?
+(contrib-enabled? #f)
+
 (cond
  [(zero? (hashtable-size (opt))) (usage #t '() #f)]
  [(opt 'help) =>
