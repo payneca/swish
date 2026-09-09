@@ -23,6 +23,9 @@
   ;;
   ;; TODO Do we need to do something with other parameters like
   ;; source-directories?
+  ;;
+  ;; TODO Should we find the installed location of Swish and have a
+  ;; contrib directory there to look in?
 
   (define contrib-enabled?
     (make-parameter #t))
