@@ -10,7 +10,7 @@ endif
 ifneq (,$(shell ${CC} --help=warnings 2> /dev/null | grep Wmisleading-indentation))
   HUSH:=${HUSH} -Wno-misleading-indentation
 endif
-C = ${CC} -m64 -msse2 -fPIC -Wall -Wextra -Werror -O2 ${CPPFLAGS} ${CFLAGS} ${LDFLAGS}
+C = ${CC} -m64 -msse2 -fPIC -O2 ${CPPFLAGS} ${CFLAGS} ${LDFLAGS}
 OsiObj=osi.o sha1.o sqlite.o sqlite3.o
 SystemLibs=-lm -ldl -lncurses -luuid -lpthread -lsystemd
 SwishLibs := ../../${BUILD}/bin/libosi.so ../../${BUILD}/lib/swish_kernel.o

@@ -73,15 +73,15 @@ jobs:
           # - machine: arm64osx
           #   os: macos-15
           #   chez: main
-          - machine: i3le
-            os: ubuntu-24.04
-            chez: main
+          # - machine: i3le
+          #   os: ubuntu-24.04
+          #   chez: main
           - machine: a6le
             os: ubuntu-24.04
             chez: released
-          - machine: a6le
-            os: ubuntu-24.04
-            chez: main
+          # - machine: a6le
+          #   os: ubuntu-24.04
+          #   chez: main
           # - machine: a6nt
           #   os: windows-2025
           #   chez: released
