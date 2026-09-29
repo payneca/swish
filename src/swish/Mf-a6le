@@ -39,6 +39,9 @@ ${UvLib}/libuv.a: Mf-a6le
 io-constants: io-constants.c ${UvInclude}
 	$C -I"${LIBUV_INCLUDE}" io-constants.c -o io-constants
 
+repro: repro.c ${UvInclude}
+	$C -I"${LIBUV_INCLUDE}" repro.c -o repro
+
 SHLIBTEST := shlibtest.so
 ${SHLIBTEST}: shlibtest.c
 	$C -shared -o $@ $^ -I"${LIBUV_INCLUDE}" -I"${SCHEME_INCLUDE}" -I"${SWISH_INCLUDE}"
