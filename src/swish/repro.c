@@ -5,7 +5,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#include <uv.h>
+#include "uv.h"
 
 static volatile sig_atomic_t sigchld_count = 0;
 
@@ -32,8 +32,9 @@ static void on_exit(uv_process_t *process,
     uv_close((uv_handle_t *) process, NULL);
 }
 
-int main(void)
-{
+int main(void) {
+  printf("libuv version: %s\n", uv_version_string());
+
     struct sigaction sa;
     uv_loop_t *loop = uv_default_loop();
     uv_process_t child;
