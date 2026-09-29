@@ -33,7 +33,7 @@ static void on_exit(uv_process_t *process,
 }
 
 int main(void) {
-  printf("libuv version: %s\n", uv_version_string());
+    fprintf(stderr, "libuv version: %s\n", uv_version_string());
 
     struct sigaction sa;
     uv_loop_t *loop = uv_default_loop();
