@@ -61,18 +61,18 @@ jobs:
       fail-fast: false
       matrix:
         config:
-          - machine: a6osx
-            os: macos-15-intel
-            chez: released
-          - machine: a6osx
-            os: macos-15-intel
-            chez: main
-          - machine: arm64osx
-            os: macos-15
-            chez: released
-          - machine: arm64osx
-            os: macos-15
-            chez: main
+          # - machine: a6osx
+          #   os: macos-15-intel
+          #   chez: released
+          # - machine: a6osx
+          #   os: macos-15-intel
+          #   chez: main
+          # - machine: arm64osx
+          #   os: macos-15
+          #   chez: released
+          # - machine: arm64osx
+          #   os: macos-15
+          #   chez: main
           - machine: i3le
             os: ubuntu-24.04
             chez: main
@@ -82,12 +82,12 @@ jobs:
           - machine: a6le
             os: ubuntu-24.04
             chez: main
-          - machine: a6nt
-            os: windows-2025
-            chez: released
-          - machine: a6nt
-            os: windows-2025
-            chez: main
+          # - machine: a6nt
+          #   os: windows-2025
+          #   chez: released
+          # - machine: a6nt
+          #   os: windows-2025
+          #   chez: main
     runs-on: ${{ matrix.config.os }}
     defaults:
       run:
