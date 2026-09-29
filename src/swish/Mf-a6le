@@ -40,7 +40,7 @@ io-constants: io-constants.c ${UvInclude}
 	$C -I"${LIBUV_INCLUDE}" io-constants.c -o io-constants
 
 repro: repro.c ${UvInclude}
-	${CC} -m64 -O2 ${CPPFLAGS} ${CFLAGS} ${LDFLAGS} -I"${LIBUV_INCLUDE}" -L"${LIBUV_LIBPATH}" -luv -Wno-unused-result repro.c -o repro
+	${CC} -m64 -O2 ${CPPFLAGS} ${CFLAGS} ${LDFLAGS} -I"${LIBUV_INCLUDE}" -L"${LIBUV_LIBPATH}" -Wno-unused-result repro.c -luv -lpthread -o repro
 
 SHLIBTEST := shlibtest.so
 ${SHLIBTEST}: shlibtest.c
