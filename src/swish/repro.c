@@ -76,7 +76,7 @@ int main(void) {
      * Give any unexpected SIGCHLD a moment to arrive.
      * The requested `sleep 30` process should still be alive.
      */
-    sleep(1);
+    sleep(5);
 
     if (kill(child.pid, 0) == 0)
         fprintf(stderr, "requested child is still alive\n");
