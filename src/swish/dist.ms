@@ -539,3 +539,124 @@
     ;; errors
     (match (catch (dist:spawn&link 'b@test '#(#f dist-test-no-such-proc ())))
       [#(EXIT #(undefined-procedure #f dist-test-no-such-proc)) 'ok])))
+
+(define (wait-for thunk what)
+  (let lp ([n 0])
+    (unless (thunk)
+      (when (> n 500) (throw `#(wait-for-timeout ,what)))
+      (sleep-ms 10)
+      (lp (+ n 1)))))
+
+(isolate-mat global-names ()
+  (start-local-node)
+  (with-node (b address 'b@test cookie)
+    (connected address)
+    (let ([p (spawn (lambda () (receive [,reason (raise reason)])))]
+          [q (rpc 'b@test '(spawn (lambda () (let lp () (receive [#(echo ,from ,x) (send from x) (lp)])))))])
+      (wait-for
+       (lambda () (= 2 (length (gen-server:call 'global-name-server 'servers))))
+       'servers)
+      ;; register here, visible there
+      (assert (eq? #t (global:register 'p p)))
+      (assert (eq? p (global:whereis 'p)))
+      (assert (eq? p (rpc 'b@test '(global:whereis 'p))))
+      (match (catch (global:register 'p self))
+        [#(EXIT #(name-already-registered ,@p)) 'ok])
+      (match (catch (rpc 'b@test `(global:register 'p ',self)))
+        [#(EXIT #(rpc-error #(name-already-registered ,@p))) 'ok])
+      ;; register there, visible here
+      (assert (eq? #t (rpc 'b@test `(global:register 'q ',q))))
+      (assert (eq? q (global:whereis 'q)))
+      ;; send to #(global name)
+      (send '#(global q) `#(echo ,self via-global))
+      (receive (after 5000 (throw 'send-global))
+        [via-global 'ok])
+      (match (catch (send '#(global nobody) 'x))
+        [#(EXIT #(bad-arg send #(global nobody))) 'ok])
+      ;; unregister
+      (assert (eq? #t (global:unregister 'q)))
+      (assert (not (global:whereis 'q)))
+      (wait-for (lambda () (not (rpc 'b@test '(global:whereis 'q)))) 'unregister)
+      ;; names are removed when processes die
+      (send p 'die)
+      (wait-for (lambda () (not (global:whereis 'p))) 'local-death)
+      (wait-for (lambda () (not (rpc 'b@test '(global:whereis 'p)))) 'remote-death)
+      (rpc 'b@test `(global:register 'q ',q))
+      (wait-for (lambda () (global:whereis 'q)) 'q)
+      (kill q 'kill)
+      (wait-for (lambda () (not (global:whereis 'q))) 'remote-death2)
+      ;; and when nodes disconnect
+      (let ([r (rpc 'b@test '(spawn (lambda () (receive))))])
+        (rpc 'b@test `(global:register 'r ',r))
+        (wait-for (lambda () (global:whereis 'r)) 'r)
+        (dist:disconnect 'b@test)
+        (wait-for (lambda () (not (global:whereis 'r))) 'disconnect))
+      (match (catch (global:register "x" self))
+        [#(EXIT #(bad-arg global:register "x")) 'ok])
+      (match (catch (global:register 'x 'y))
+        [#(EXIT #(bad-arg global:register y)) 'ok]))))
+
+(isolate-mat global-lock ()
+  ;; concurrent registrations of the same name: exactly one succeeds
+  (start-local-node)
+  (with-node (b address 'b@test cookie)
+    (connected address)
+    (wait-for
+     (lambda () (= 2 (length (gen-server:call 'global-name-server 'servers))))
+     'servers)
+    (rpc 'b@test '(define dist-test-pid (spawn (lambda () (receive)))))
+    (do ([i 0 (+ i 1)]) ((= i 10))
+      (let* ([name (string->symbol (format "race~a" i))]
+             [me self]
+             [local (spawn (lambda () (receive)))])
+        (spawn
+         (lambda ()
+           (send me
+             `#(here ,(catch (global:register name local))))))
+        (spawn
+         (lambda ()
+           (send me
+             `#(there
+                ,(catch (rpc 'b@test `(global:register ',name dist-test-pid)))))))
+        (let ([results
+               (map (lambda (tag)
+                      (receive (after 10000 (throw 'race-timeout))
+                        [#(,@tag ,r) r]))
+                 '(here there))])
+          (assert (= 1 (length (filter (lambda (r) (eq? r #t)) results))))
+          (let ([winner (global:whereis name)])
+            (assert (process? winner))
+            (assert (eq? winner (rpc 'b@test `(global:whereis ',name))))))))))
+
+(isolate-mat global-conflict ()
+  ;; conflicting names registered during a partition are resolved when the
+  ;; nodes reconnect
+  (start-local-node)
+  (with-node (b address 'b@test cookie)
+    (connected address)
+    (let ([p (spawn (lambda () (receive)))]
+          [q (rpc 'b@test '(spawn (lambda () (receive))))])
+      (rpc 'b@test `(define dist-test-q ',q))
+      (dist:disconnect 'b@test)
+      (wait-for (lambda () (null? (dist:nodes))) 'disconnect)
+      (global:register 'x p)
+      ;; talk to b via stdin since we are not connected
+      (let ([op (<node> to-stdin b)] [os-pid (<node> os-pid b)])
+        (write
+         '(begin
+            (printf "global-x:~a\n" (global:register 'x dist-test-q))
+            (flush-output-port))
+         op)
+        (newline op)
+        (flush-output-port op)
+        (receive (after 10000 (throw 'partition-register))
+          [#(stdout ,@os-pid "global-x:#t") 'ok]))
+      (connected address)
+      ;; a@test sorts before b@test, so p wins
+      (let ([m (monitor q)])
+        (receive (after 5000 (throw 'conflict))
+          [`(DOWN ,@m ,@q ,reason)
+           (assert (member reason '(#(global-name-conflict x) noproc)))])
+        (assert (process-alive? p 0))
+        (assert (eq? p (global:whereis 'x)))
+        (assert (eq? p (rpc 'b@test '(global:whereis 'x))))))))

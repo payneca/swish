@@ -45,6 +45,9 @@
    dist:spawn&link
    dist:start&link
    dist:stop
+   global:register
+   global:unregister
+   global:whereis
    )
   (import
    (chezscheme)
@@ -263,6 +266,15 @@
       (let ([conn (node-conn (rpid-node dest))])
         (when conn
           (send conn `#(out ,(encode `#(send ,dest ,msg))))))]
+     [(and (vector? dest)
+           (fx= (vector-length dest) 2)
+           (eq? (vector-ref dest 0) 'global)
+           (symbol? (vector-ref dest 1)))
+      ;; #(global name) shadows #(name node) for a process named global
+      (let ([p (global:whereis (vector-ref dest 1))])
+        (unless p
+          (bad-arg 'send dest))
+        (send p msg))]
      [(and (vector? dest)
            (fx= (vector-length dest) 2)
            (symbol? (vector-ref dest 0))
@@ -639,6 +651,9 @@
             [else
              (with-interrupts-disabled
               (eq-hashtable-set! node-conns node pid))
+             (let ([g (whereis 'global-name-server)])
+               (when g
+                 (send g `#(nodeup ,node))))
              `#(reply ok
                  ,($state copy* [conns (cons (cons pid node) conns)]))])))]
       [listen-port
@@ -720,7 +735,8 @@
             #(net-kernel
               ,(lambda ()
                  (gen-server:start&link 'net-kernel node cookie port address))
-              permanent 1000 worker))))]))
+              permanent 1000 worker)
+            #(global-name-server ,global-start&link permanent 1000 worker))))]))
 
   (define (dist:stop)
     (let ([sup (whereis 'dist-sup)])
@@ -757,4 +773,182 @@
     (sort
      (lambda (a b) (string<? (symbol->string a) (symbol->string b)))
      (with-interrupts-disabled (vector->list (hashtable-keys node-conns)))))
+
+  ;; Global names
+  ;;
+  ;; Each node's global-name-server holds a replica of the table of global
+  ;; names. To register a name, the caller locks the name on every connected
+  ;; server in node order, then registers it on each server, which releases
+  ;; the lock. Servers monitor registered processes and lock owners, so names
+  ;; disappear when processes die or their nodes disconnect. When nodes
+  ;; connect, the servers exchange tables and resolve conflicting names by
+  ;; killing the process that sorts later.
+
+  (define (global-start&link)
+    (define-state-tuple <global>
+      names                             ; name -> #(pid monitor)
+      locks                             ; name -> #(owner monitor)
+      peers                             ; node -> #(pid monitor)
+      )
+    (define (init)
+      `#(ok ,(<global> make
+               [names (make-eq-hashtable)]
+               [locks (make-eq-hashtable)]
+               [peers (make-eq-hashtable)])))
+    (define (terminate reason state) 'ok)
+    (define (entries state)
+      (let-values ([(names vals) (hashtable-entries ($state names))])
+        (map (lambda (name v) (cons name (vector-ref v 0)))
+          (vector->list names)
+          (vector->list vals))))
+    (define (add-name! name pid state)
+      (let ([names ($state names)])
+        (match (hashtable-ref names name #f)
+          [#f (hashtable-set! names name (vector pid (monitor pid)))]
+          [#(,@pid ,_) (void)]
+          [#(,other ,m)
+           ;; conflict, e.g., after a partition heals
+           (let ([winner (global-winner pid other)])
+             (unless (eq? winner other)
+               (demonitor&flush m)
+               (hashtable-set! names name (vector pid (monitor pid))))
+             (kill (if (eq? winner pid) other pid)
+               `#(global-name-conflict ,name)))])))
+    (define (remove-name! name state)
+      (let ([names ($state names)])
+        (match (hashtable-ref names name #f)
+          [#f (void)]
+          [#(,_ ,m)
+           (demonitor&flush m)
+           (hashtable-delete! names name)])))
+    (define (release-lock! name owner state)
+      (let ([locks ($state locks)])
+        (match (hashtable-ref locks name #f)
+          [#(,@owner ,m)
+           (demonitor&flush m)
+           (hashtable-delete! locks name)]
+          [,_ (void)])))
+    (define (remove-matching! ht m)
+      (let-values ([(keys vals) (hashtable-entries ht)])
+        (vector-for-each
+         (lambda (key v)
+           (when (eq? (vector-ref v 1) m)
+             (hashtable-delete! ht key)))
+         keys vals)))
+    (define (handle-call msg from state)
+      (match msg
+        [servers
+         (let-values ([(nodes vals) (hashtable-entries ($state peers))])
+           `#(reply
+              ,(map cdr
+                 (sort (lambda (a b) (string<? (car a) (car b)))
+                   (cons (cons (symbol->string (dist:node)) self)
+                     (map (lambda (node v) (cons (symbol->string node) (vector-ref v 0)))
+                       (vector->list nodes)
+                       (vector->list vals)))))
+              ,state))]
+        [#(lock ,name ,owner)
+         (let ([locks ($state locks)])
+           (cond
+            [(hashtable-ref ($state names) name #f) =>
+             (lambda (v) `#(reply #(registered ,(vector-ref v 0)) ,state))]
+            [(hashtable-ref locks name #f) =>
+             (lambda (v)
+               `#(reply ,(if (eq? (vector-ref v 0) owner) 'ok 'locked) ,state))]
+            [else
+             (hashtable-set! locks name (vector owner (monitor owner)))
+             `#(reply ok ,state)]))]
+        [#(unlock ,name ,owner)
+         (release-lock! name owner state)
+         `#(reply ok ,state)]
+        [#(register ,name ,pid ,owner)
+         (release-lock! name owner state)
+         (add-name! name pid state)
+         `#(reply ok ,state)]
+        [#(unregister ,name)
+         (remove-name! name state)
+         `#(reply ok ,state)]
+        [#(whereis ,name)
+         `#(reply ,(cond
+                    [(hashtable-ref ($state names) name #f) =>
+                     (lambda (v) (vector-ref v 0))]
+                    [else #f])
+             ,state)]))
+    (define (handle-cast msg state) (match msg))
+    (define (handle-info msg state)
+      (match msg
+        [#(nodeup ,node)
+         (send `#(global-name-server ,node)
+           `#(global-hello ,self ,(dist:node) ,(entries state)))
+         `#(no-reply ,state)]
+        [#(global-hello ,pid ,node ,entries)
+         (let ([peers ($state peers)])
+           (match (hashtable-ref peers node #f)
+             [#(,@pid ,_) (void)]
+             [,_ (hashtable-set! peers node (vector pid (monitor pid)))]))
+         (for-each
+          (lambda (entry) (add-name! (car entry) (cdr entry) state))
+          entries)
+         `#(no-reply ,state)]
+        [`(DOWN ,m ,_ ,_)
+         (remove-matching! ($state names) m)
+         (remove-matching! ($state locks) m)
+         (remove-matching! ($state peers) m)
+         `#(no-reply ,state)]))
+    (gen-server:start&link 'global-name-server))
+
+  ;; Both nodes must pick the same winner.
+  (define (global-winner p1 p2)
+    (define (key p) (cons (symbol->string (dist:node p)) (process-id p)))
+    (let ([k1 (key p1)] [k2 (key p2)])
+      (if (or (string<? (car k1) (car k2))
+              (and (string=? (car k1) (car k2)) (< (cdr k1) (cdr k2))))
+          p1
+          p2)))
+
+  (define (global-servers)
+    (gen-server:call 'global-name-server 'servers))
+
+  (define (global:register name pid)
+    (define (release servers)
+      (for-each
+       (lambda (s) (catch (gen-server:call s `#(unlock ,name ,self))))
+       servers))
+    (define (acquire servers)
+      (let lp ([servers servers] [acquired '()])
+        (if (null? servers)
+            'ok
+            (match (catch (gen-server:call (car servers) `#(lock ,name ,self)))
+              [ok (lp (cdr servers) (cons (car servers) acquired))]
+              [,other
+               (release acquired)
+               (match other
+                 [#(registered ,_) other]
+                 [,_ 'locked])]))))
+    (arg-check 'global:register [name symbol?] [pid process?])
+    (let retry ([attempt 0])
+      (let ([servers (global-servers)])
+        (match (acquire servers)
+          [ok
+           (for-each
+            (lambda (s)
+              (catch (gen-server:call s `#(register ,name ,pid ,self))))
+            servers)
+           #t]
+          [#(registered ,p) (throw `#(name-already-registered ,p))]
+          [locked
+           (when (> attempt 100)
+             (throw `#(global-lock-timeout ,name)))
+           (receive (after (+ 1 (random 20)) (retry (+ attempt 1))))]))))
+
+  (define (global:unregister name)
+    (arg-check 'global:unregister [name symbol?])
+    (for-each
+     (lambda (s) (catch (gen-server:call s `#(unregister ,name))))
+     (global-servers))
+    #t)
+
+  (define (global:whereis name)
+    (arg-check 'global:whereis [name symbol?])
+    (gen-server:call 'global-name-server `#(whereis ,name)))
   )
