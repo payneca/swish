@@ -445,3 +445,97 @@
       (match (catch (gen-server:call server 'inc))
         [#(EXIT #(,reason #(gen-server call (,@server inc))))
          (assert (memq reason '(noproc bad-thing)))]))))
+
+(isolate-mat remote-spawn ()
+  (start-local-node)
+  (with-node (b address 'b@test cookie)
+    (connected address)
+    ;; procedure from a library
+    (let ([p (dist:spawn 'b@test `#((swish erlang) send (,self hello)))])
+      (assert (process? p))
+      (assert (eq? (dist:node p) 'b@test))
+      (receive (after 5000 (throw 'spawn-library))
+        [hello 'ok]))
+    ;; procedure from the interaction environment
+    (rpc 'b@test
+      '(define (dist-test-echo from)
+         (send from `#(echo ,self ,(dist:node)))))
+    (let ([p (dist:spawn 'b@test `#(#f dist-test-echo (,self)))])
+      (receive (after 5000 (throw 'spawn-interaction))
+        [#(echo ,@p b@test) 'ok]))
+    ;; spawning on the local node
+    (let ([p (dist:spawn 'a@test `#((swish erlang) send (,self local)))])
+      (assert (eq? (dist:node p) 'a@test))
+      (receive (after 5000 (throw 'spawn-local))
+        [local 'ok]))
+    ;; errors are reported to the caller
+    (rpc 'b@test '(define dist-test-not-proc 42))
+    (match (catch (dist:spawn 'b@test '#((no such library) foo ())))
+      [#(EXIT #(bad-module (no such library))) 'ok])
+    (match (catch (dist:spawn 'b@test '#(#f dist-test-no-such-proc ())))
+      [#(EXIT #(undefined-procedure #f dist-test-no-such-proc)) 'ok])
+    (match (catch (dist:spawn 'b@test '#(#f dist-test-not-proc ())))
+      [#(EXIT #(not-a-procedure #f dist-test-not-proc)) 'ok])
+    (match (catch (dist:spawn 'a@test '#(#f dist-test-no-such-proc ())))
+      [#(EXIT #(undefined-procedure #f dist-test-no-such-proc)) 'ok])
+    (match (catch (dist:spawn 'c@test '#((chezscheme) list ())))
+      [#(EXIT #(noconnection c@test)) 'ok])
+    (match (catch (dist:spawn 'b@test '#((chezscheme) list oops)))
+      [#(EXIT #(bad-arg dist:spawn #((chezscheme) list oops))) 'ok])
+    (match (catch (dist:spawn "b@test" '#((chezscheme) list ())))
+      [#(EXIT #(bad-arg dist:spawn "b@test")) 'ok])
+    ;; no closures cross the wire
+    (match (catch (dist:spawn 'b@test `#((chezscheme) apply (,list (1 2)))))
+      [#(EXIT ,_) 'ok])
+    ;; a failure in the spawned process is not reported to the caller
+    (let* ([p (dist:spawn 'b@test '#((chezscheme) raise (oops)))]
+           [m (monitor p)])
+      (receive (after 5000 (throw 'spawn-raise))
+        [`(DOWN ,@m ,@p ,reason) (assert (memq reason '(oops noproc)))]))))
+
+(isolate-mat remote-spawn&link ()
+  (start-local-node)
+  (with-node (b address 'b@test cookie)
+    (connected address)
+    ;; the link is in place before the remote process can exit
+    (process-trap-exit #t)
+    (let ([p (dist:spawn&link 'b@test '#((chezscheme) raise (oops)))])
+      (receive (after 5000 (throw 'spawn&link-exit))
+        [`(EXIT ,@p oops) 'ok]))
+    (let ([p (dist:spawn&link 'b@test '#((chezscheme) void ()))])
+      (receive (after 5000 (throw 'spawn&link-normal))
+        [`(EXIT ,@p normal) 'ok]))
+    (process-trap-exit #f)
+    ;; the remote process dies with its local caller
+    (let* ([me self]
+           [caller
+            (spawn
+             (lambda ()
+               (send me
+                 `#(spawned
+                    ,(dist:spawn&link 'b@test '#(#f dist-test-evaluator ()))))
+               (receive [,reason (raise reason)])))]
+           [p (receive (after 5000 (throw 'spawn&link-caller))
+                [#(spawned ,p) p])]
+           [m (monitor p)])
+      (send caller 'caller-died)
+      (receive (after 5000 (throw 'spawn&link-remote-died))
+        [`(DOWN ,@m ,@p caller-died) 'ok]))
+    ;; and the local caller dies with the remote process
+    (let* ([me self]
+           [caller
+            (spawn
+             (lambda ()
+               (send me
+                 `#(spawned
+                    ,(dist:spawn&link 'b@test '#(#f dist-test-evaluator ()))))
+               (receive)))]
+           [cm (monitor caller)]
+           [p (receive (after 5000 (throw 'spawn&link-caller2))
+                [#(spawned ,p) p])])
+      (kill p 'remote-died)
+      (receive (after 5000 (throw 'spawn&link-caller-died))
+        [`(DOWN ,@cm ,@caller remote-died) 'ok]))
+    ;; errors
+    (match (catch (dist:spawn&link 'b@test '#(#f dist-test-no-such-proc ())))
+      [#(EXIT #(undefined-procedure #f dist-test-no-such-proc)) 'ok])))

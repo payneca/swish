@@ -41,6 +41,8 @@
    dist:listen-port
    dist:node
    dist:nodes
+   dist:spawn
+   dist:spawn&link
    dist:start&link
    dist:stop
    )
@@ -346,7 +348,74 @@
          ($remote-demonitor m))]
       [#(down ,m ,reason)
        (when (local-process? (mon-origin m))
-         ($remote-down m reason))]))
+         ($remote-down m reason))]
+      [#(spawn ,from ,ref ,module ,proc ,args ,link?)
+       (let ([reply
+              (match (try (resolve-procedure module proc))
+                [`(catch ,reason) `#(error ,reason)]
+                [,f
+                 ;; The new process does not run until we yield, so we can
+                 ;; link and reply before it can exit.
+                 (let ([pid (spawn (lambda () (apply f args)))])
+                   (when link?
+                     ($remote-link pid from))
+                   `#(ok ,pid))])])
+         (send writer `#(ctl #(spawn-reply ,from ,ref ,link? ,reply))))]
+      [#(spawn-reply ,to ,ref ,link? ,reply)
+       (match reply
+         [#(ok ,pid)
+          ;; Link here rather than in the caller so that we do not miss an
+          ;; exit signal that arrives before the caller sees the reply.
+          (when link?
+            (let ([r (if (local-process? to) ($remote-link to pid) 'noproc)])
+              (unless (eq? r #t)
+                (send writer `#(ctl #(exit link ,pid ,to ,r))))))]
+         [,_ (void)])
+       (when (local-process? to)
+         (send to `#(dist-spawn-reply ,ref ,reply)))]))
+
+  ;; Remote spawn resolves procedures by name so that no closures cross
+  ;; the wire. module is a library name or #f for interaction-environment.
+  (define (resolve-procedure module proc)
+    (let ([env (if module
+                   (match (try (environment module))
+                     [`(catch ,_) (throw `#(bad-module ,module))]
+                     [,env env])
+                   (interaction-environment))])
+      (match (try (top-level-value proc env))
+        [`(catch ,_) (throw `#(undefined-procedure ,module ,proc))]
+        [,f (guard (procedure? f)) f]
+        [,_ (throw `#(not-a-procedure ,module ,proc))])))
+
+  (define (do-spawn who node spec link?)
+    (unless (symbol? node)
+      (bad-arg who node))
+    (match spec
+      [#(,module ,proc ,args)
+       (guard (and (or (not module) (list? module)) (symbol? proc) (list? args)))
+       (cond
+        [(eq? node (dist:node))
+         (let ([f (resolve-procedure module proc)])
+           ((if link? spawn&link spawn) (lambda () (apply f args))))]
+        [(node-conn node) =>
+         (lambda (conn)
+           (let ([ref (osi_make_uuid)]
+                 [m (monitor conn)])
+             (send conn
+               `#(out ,(encode `#(spawn ,self ,ref ,module ,proc ,args ,link?))))
+             (receive
+              [#(dist-spawn-reply ,@ref ,reply)
+               (demonitor&flush m)
+               (match reply
+                 [#(ok ,pid) pid]
+                 [#(error ,reason) (throw reason)])]
+              [`(DOWN ,@m ,_ ,_) (throw `#(noconnection ,node))])))]
+        [else (throw `#(noconnection ,node))])]
+      [,_ (bad-arg who spec)]))
+
+  (define (dist:spawn node spec) (do-spawn 'dist:spawn node spec #f))
+
+  (define (dist:spawn&link node spec) (do-spawn 'dist:spawn&link node spec #t))
 
   ;; Carriers move frames between nodes.
 
