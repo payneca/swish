@@ -58,6 +58,9 @@
 
 (define-tuple <node> name os-pid to-stdin)
 
+;; tcp or ws
+(define dist-transport (make-process-parameter 'tcp))
+
 ;; Start a child swish OS process running a node named name.
 (define (start-node name node-cookie)
   (define me self)
@@ -79,22 +82,26 @@
       (for-each
        (lambda (x) (write x to-stdin) (newline to-stdin))
        `(,@child-prelude
-         (dist:start&link ',name ,node-cookie 0 "127.0.0.1")
+         (dist:start&link ',name ,node-cookie 0 "127.0.0.1" 0)
          (register 'evaluator (spawn dist-test-evaluator))
          (begin
-           (printf "dist-port:~a\n" (dist:listen-port))
+           (printf "dist-port:~a ws-port:~a\n" (dist:listen-port)
+             (dist:websocket-port))
            (flush-output-port))))
       (flush-output-port to-stdin)
       (let ([port
              (let lp ()
                (receive (after 20000 (throw `#(timeout-starting-node ,name)))
                  [#(stdout ,@os-pid ,line)
-                  (match (pregexp-match "dist-port:(\\d+)" line)
-                    [(,_ ,port) (string->number port)]
+                  (match (pregexp-match "dist-port:(\\d+) ws-port:(\\d+)" line)
+                    [(,_ ,port ,ws-port)
+                     (match (dist-transport)
+                       [tcp (format "127.0.0.1:~a" port)]
+                       [ws (format "ws://127.0.0.1:~a/dist" ws-port)])]
                     [#f (lp)])]))])
         (values
          (<node> make [name name] [os-pid os-pid] [to-stdin to-stdin])
-         (format "127.0.0.1:~a" port))))))
+         port)))))
 
 (define (stop-node node)
   (osi_kill* (<node> os-pid node) 9))
@@ -114,7 +121,7 @@
 
 (define (start-local-node)
   (start-silent-event-mgr)
-  (match (dist:start&link 'a@test cookie 0 "127.0.0.1")
+  (match (dist:start&link 'a@test cookie 0 "127.0.0.1" 0)
     [#(ok ,pid) pid]))
 
 (define (connected address)
@@ -130,11 +137,12 @@
   (match (catch (send '#(foo b@test) 'x))
     [#(EXIT #(bad-arg send #(foo b@test))) 'ok]))
 
-(isolate-mat connect ()
+(define (test-connect)
   (start-local-node)
   (assert (eq? (dist:node) 'a@test))
   (assert (eq? (dist:node self) 'a@test))
   (with-node (b address 'b@test cookie)
+    (assert (eq? (dist-transport) (if (starts-with? address "ws:") 'ws 'tcp)))
     (assert (eq? (connected address) 'b@test))
     (assert (equal? (dist:nodes) '(b@test)))
     (assert (equal? (rpc 'b@test '(dist:nodes)) '(a@test)))
@@ -153,7 +161,7 @@
     (assert (eq? (connected address) 'b@test))
     (assert (equal? (rpc 'b@test '(dist:nodes)) '(a@test)))))
 
-(isolate-mat bad-cookie ()
+(define (test-bad-cookie)
   (start-local-node)
   (with-node (b address 'b@test "wrong-cookie")
     (match (dist:connect address)
@@ -164,7 +172,7 @@
   (match (catch (dist:connect "no-port"))
     [#(EXIT #(bad-address "no-port")) 'ok]))
 
-(isolate-mat send-remote-pid ()
+(define (test-send-remote-pid)
   (start-local-node)
   (with-node (b address 'b@test cookie)
     (connected address)
@@ -204,7 +212,7 @@
       (match (catch (send p (lambda () 'no-closures)))
         [#(EXIT ,_) 'ok]))))
 
-(isolate-mat remote-monitor ()
+(define (test-remote-monitor)
   (start-local-node)
   (with-node (b address 'b@test cookie)
     (connected address)
@@ -282,7 +290,7 @@
         (receive (after 5000 (throw '#(timeout 14)))
           [#(remote-saw local-crash) 'ok])))))
 
-(isolate-mat remote-link ()
+(define (test-remote-link)
   (start-local-node)
   (with-node (b address 'b@test cookie)
     (connected address)
@@ -384,7 +392,7 @@
         (receive (after 5000 (throw '#(timeout 26)))
           [#(remote-got-exit ,@self please-stop) 'ok])))))
 
-(isolate-mat noconnection ()
+(define (test-noconnection)
   (start-local-node)
   (let-values ([(b address) (start-node 'b@test cookie)])
     (on-exit (stop-node b)
@@ -415,7 +423,7 @@
         (receive (after 5000 (throw '#(timeout 32)))
           [`(EXIT ,@p noconnection) 'ok])))))
 
-(isolate-mat remote-gen-server ()
+(define (test-remote-gen-server)
   (start-local-node)
   (with-node (b address 'b@test cookie)
     (connected address)
@@ -493,7 +501,7 @@
       (receive (after 5000 (throw 'spawn-raise))
         [`(DOWN ,@m ,@p ,reason) (assert (memq reason '(oops noproc)))]))))
 
-(isolate-mat remote-spawn&link ()
+(define (test-remote-spawn&link)
   (start-local-node)
   (with-node (b address 'b@test cookie)
     (connected address)
@@ -547,7 +555,7 @@
       (sleep-ms 10)
       (lp (+ n 1)))))
 
-(isolate-mat global-names ()
+(define (test-global-names)
   (start-local-node)
   (with-node (b address 'b@test cookie)
     (connected address)
@@ -660,3 +668,72 @@
         (assert (process-alive? p 0))
         (assert (eq? p (global:whereis 'x)))
         (assert (eq? p (rpc 'b@test '(global:whereis 'x))))))))
+
+(isolate-mat connect () (test-connect))
+
+(isolate-mat ws-connect ()
+  (parameterize ([dist-transport 'ws])
+    (test-connect)))
+
+(isolate-mat bad-cookie () (test-bad-cookie))
+
+(isolate-mat ws-bad-cookie ()
+  (parameterize ([dist-transport 'ws])
+    (test-bad-cookie)))
+
+(isolate-mat send-remote-pid () (test-send-remote-pid))
+
+(isolate-mat ws-send-remote-pid ()
+  (parameterize ([dist-transport 'ws])
+    (test-send-remote-pid)))
+
+(isolate-mat remote-monitor () (test-remote-monitor))
+
+(isolate-mat ws-remote-monitor ()
+  (parameterize ([dist-transport 'ws])
+    (test-remote-monitor)))
+
+(isolate-mat remote-link () (test-remote-link))
+
+(isolate-mat ws-remote-link ()
+  (parameterize ([dist-transport 'ws])
+    (test-remote-link)))
+
+(isolate-mat noconnection () (test-noconnection))
+
+(isolate-mat ws-noconnection ()
+  (parameterize ([dist-transport 'ws])
+    (test-noconnection)))
+
+(isolate-mat remote-gen-server () (test-remote-gen-server))
+
+(isolate-mat ws-remote-gen-server ()
+  (parameterize ([dist-transport 'ws])
+    (test-remote-gen-server)))
+
+(isolate-mat remote-spawn&link () (test-remote-spawn&link))
+
+(isolate-mat ws-remote-spawn&link ()
+  (parameterize ([dist-transport 'ws])
+    (test-remote-spawn&link)))
+
+(isolate-mat global-names () (test-global-names))
+
+(isolate-mat ws-global-names ()
+  (parameterize ([dist-transport 'ws])
+    (test-global-names)))
+
+(isolate-mat ws-reverse ()
+  ;; the child connects to us over WebSocket
+  (start-local-node)
+  (with-node (b address 'b@test cookie)
+    (let ([op (<node> to-stdin b)])
+      (write
+       `(dist:connect ,(format "ws://127.0.0.1:~a/dist" (dist:websocket-port)))
+       op)
+      (newline op)
+      (flush-output-port op))
+    (wait-for (lambda () (equal? (dist:nodes) '(b@test))) 'reverse-connect)
+    (let ([p (dist:spawn 'b@test `#((swish erlang) send (,self hello)))])
+      (receive (after 5000 (throw 'ws-reverse))
+        [hello 'ok]))))

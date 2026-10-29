@@ -45,6 +45,8 @@
    dist:spawn&link
    dist:start&link
    dist:stop
+   dist:url-handler
+   dist:websocket-port
    global:register
    global:unregister
    global:whereis
@@ -54,11 +56,14 @@
    (swish digest)
    (swish erlang)
    (swish gen-server)
+   (swish http)
    (swish internal)
    (swish io)
    (swish osi)
+   (swish pregexp)
    (swish supervisor)
    (swish watcher)
+   (swish websocket)
    )
 
   ($import-internal
@@ -477,15 +482,86 @@
          [else (lp (- i 1))])))
     (unless (string? address)
       (bad-arg 'dist:connect address))
-    (let-values ([(host port) (host+port address)])
-      `#(tcp ,host ,port)))
+    (match (pregexp-match "^ws://([^/]+)(/.*)?$" address)
+      [(,_ ,authority ,path)
+       (let-values ([(host port) (host+port authority)])
+         `#(ws ,host ,port ,(or path "/dist")))]
+      [#f
+       (let-values ([(host port) (host+port address)])
+         `#(tcp ,host ,port))]))
 
   (define (open-carrier address)
     (match (parse-address address)
       [#(tcp ,host ,port)
        (let-values ([(ip op) (connect-tcp host port)])
          (tcp-nodelay op #t)
-         (tcp-carrier ip op))]))
+         (tcp-carrier ip op))]
+      [#(ws ,host ,port ,path)
+       (let ([relay (start-relay)])
+         (ws:connect host port path relay)
+         (ws-carrier relay))]))
+
+  ;; The WebSocket carrier sends each frame, including its length prefix, as
+  ;; one binary message. The ws process delivers messages to a relay, which
+  ;; hands them out one at a time to whichever process asks. That lets the
+  ;; connection switch from reading in the connection process during the
+  ;; handshake to reading in its reader process without reordering frames.
+  (define (start-relay)
+    (spawn&link
+     (lambda ()
+       (let ([ws (receive
+                  (after handshake-timeout (raise 'websocket-init-timeout))
+                  [#(ws:init ,ws) ws])])
+         (define (closed reason)
+           (raise `#(websocket-closed ,reason)))
+         (define (serve-read from)
+           (receive
+            [#(ws:message ,@ws ,msg)
+             (send from `#(ws-frame ,self ,msg))]
+            [#(write ,frame)
+             (ws:send ws frame)
+             (serve-read from)]
+            [close (ws:close ws) (serve-read from)]
+            [#(ws:closed ,@ws ,code ,_) (closed code)]
+            [`(DOWN ,_ ,@ws ,reason) (closed reason)]))
+         (monitor ws)
+         (let lp ()
+           (receive
+            [#(read ,from) (serve-read from)]
+            [#(write ,frame) (ws:send ws frame)]
+            [close (ws:close ws)]
+            [#(ws:closed ,@ws ,code ,_) (closed code)]
+            [`(DOWN ,_ ,@ws ,reason) (closed reason)])
+           (lp))))))
+
+  (define (ws-carrier relay)
+    (make-carrier
+     (lambda ()
+       (send relay `#(read ,self))
+       (receive
+        [#(ws-frame ,@relay ,msg)
+         (unless (and (bytevector? msg)
+                      (fx>= (bytevector-length msg) 4)
+                      (= (bytevector-u32-ref msg 0 (endianness big))
+                         (fx- (bytevector-length msg) 4)))
+           (throw 'bad-websocket-frame))
+         (let* ([n (fx- (bytevector-length msg) 4)]
+                [payload (make-bytevector n)])
+           (bytevector-copy! msg 4 payload 0 n)
+           payload)]))
+     (lambda (frame) (send relay `#(write ,frame)))
+     (lambda () (send relay 'close))))
+
+  ;; An http:url-handler that accepts dist connections over WebSocket at
+  ;; /dist, for use with an existing HTTP server.
+  (define (dist:url-handler)
+    (http:url-handler
+     (and (string=? (<request> path request) "/dist")
+          (whereis 'net-kernel)
+          (begin
+            (gen-server:call 'net-kernel `#(accept-ws ,self))
+            (receive (after handshake-timeout (throw 'dist-accept-timeout))
+              [#(dist-relay ,relay) (ws:upgrade conn request relay)])))))
 
   ;; HMAC-SHA1 (RFC 2104); the default digest provider has no HMAC support.
   (define (sha1 . bvs)
@@ -543,6 +619,10 @@
     (define c
       (match mode
         [#(accept ,c) c]
+        [#(accept-ws ,handler)
+         (let ([relay (start-relay)])
+           (send handler `#(dist-relay ,relay))
+           (ws-carrier relay))]
         [#(connect ,address) (open-carrier address)]))
     (define watchdog
       (spawn&link
@@ -656,6 +736,9 @@
                  (send g `#(nodeup ,node))))
              `#(reply ok
                  ,($state copy* [conns (cons (cons pid node) conns)]))])))]
+      [#(accept-ws ,handler)
+       (match (start-connection `#(accept-ws ,handler) state)
+         [#(,_ ,state) `#(reply ok ,state)])]
       [listen-port
        `#(reply ,(listener-port-number ($state listener)) ,state)]
       [#(disconnect ,node)
@@ -723,11 +806,16 @@
      [(name cookie) (dist:start&link name cookie 0 "0.0.0.0")]
      [(name cookie port) (dist:start&link name cookie port "0.0.0.0")]
      [(name cookie port address)
+      (dist:start&link name cookie port address #f)]
+     [(name cookie port address ws-port)
+      ;; ws-port, if not #f, starts an HTTP server that accepts dist
+      ;; connections over WebSocket at /dist.
       (let ([node (full-node-name 'dist:start&link name)]
             [cookie (->cookie 'dist:start&link cookie)])
         (arg-check 'dist:start&link
           [port fixnum? (lambda (p) (fx<= 0 p 65535))]
-          [address string?])
+          [address string?]
+          [ws-port (lambda (p) (or (not p) (and (fixnum? p) (fx<= 0 p 65535))))])
         (supervisor:start&link 'dist-sup 'one-for-all 0 1
           `(#(dist-conn-sup
               ,(lambda () (watcher:start&link 'dist-conn-sup))
@@ -736,7 +824,13 @@
               ,(lambda ()
                  (gen-server:start&link 'net-kernel node cookie port address))
               permanent 1000 worker)
-            #(global-name-server ,global-start&link permanent 1000 worker))))]))
+            #(global-name-server ,global-start&link permanent 1000 worker)
+            ,@(if ws-port
+                  (http:configure-server 'dist-http ws-port (dist:url-handler))
+                  '()))))]))
+
+  (define (dist:websocket-port)
+    (http:get-port-number 'dist-http))
 
   (define (dist:stop)
     (let ([sup (whereis 'dist-sup)])
