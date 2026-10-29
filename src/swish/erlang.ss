@@ -176,12 +176,12 @@
 
   (define enqueued? q-prev)
 
-  (define-record-type mon
-    (nongenerative)
-    (sealed #t)
-    (fields
-     (immutable origin)
-     (immutable target)))
+  ($import-internal
+   mon make-mon mon? mon-origin mon-target
+   rpid rpid? rpid-node rpid-creation rpid-id
+   dist-hooks-send dist-hooks-link dist-hooks-unlink dist-hooks-monitor
+   dist-hooks-demonitor dist-hooks-exit get-dist-hooks
+   make-dist-core set-dist-core!)
 
   (define-record-type pcb
     (nongenerative)
@@ -253,6 +253,15 @@
     (on-exit (osi_exit 80)
       ($console-event-handler event)))
 
+  ;; Called with interrupts disabled from @kill, so the hook must not block.
+  ;; Without hooks, there is no one to notify.
+  (define-syntax @dist-hook
+    (syntax-rules ()
+      [(_ field arg ...)
+       (let ([hooks (get-dist-hooks)])
+         (when hooks
+           ((field hooks) arg ...)))]))
+
   (define (@kill p raw-reason)
     (define reason (unwrap-fault-condition raw-reason))
     (define extended-reason
@@ -291,7 +300,12 @@
          (let ([origin (mon-origin m)])
            (cond
             [(eq? origin p)
-             (@remove-monitor m (mon-target m))]
+             (let ([target (mon-target m)])
+               (if (rpid? target)
+                   (@dist-hook dist-hooks-demonitor m)
+                   (@remove-monitor m target)))]
+            [(rpid? origin)
+             (@dist-hook dist-hooks-exit 'down m p extended-reason)]
             [else
              (@send origin (make-DOWN-msg m p extended-reason))
              (@remove-monitor m origin)])))
@@ -303,7 +317,9 @@
   (define (@remove-links froms to)
     (unless (null? froms)
       (let ([from (car froms)])
-        (@remove-link from to)
+        ;; remote peers remove their side when they get the exit signal
+        (unless (rpid? from)
+          (@remove-link from to))
         (@remove-links (cdr froms) to))))
 
   (define (@remove-link from to)
@@ -365,18 +381,30 @@
     (no-inline throw `#(bad-arg ,who ,arg)))
 
   (define (kill p raw-reason)
-    (unless (pcb? p)
-      (bad-arg 'kill p))
-    (no-interrupts
-     (when (alive? p)
-       (let ([reason (unwrap-fault-condition raw-reason)])
-         (cond
-          [(eq? reason 'kill) (@kill p 'killed)]
-          [(pcb-trap-exit p) (@send-EXIT p self raw-reason)]
-          [(not (eq? reason 'normal)) (@kill p raw-reason)]))
-       (unless (alive? self)
-         (yield #f 0))))
+    (cond
+     [(pcb? p)
+      (no-interrupts
+       (when (alive? p)
+         (let ([reason (unwrap-fault-condition raw-reason)])
+           (cond
+            [(eq? reason 'kill) (@kill p 'killed)]
+            [(pcb-trap-exit p) (@send-EXIT p self raw-reason)]
+            [(not (eq? reason 'normal)) (@kill p raw-reason)]))
+         (unless (alive? self)
+           (yield #f 0))))]
+     [(rpid? p) (dist-call dist-hooks-exit ('kill p self raw-reason) (void))]
+     [else (bad-arg 'kill p)])
     #t)
+
+  ;; Without hooks, an rpid behaves like a process on a node to which we
+  ;; have no connection.
+  (define-syntax dist-call
+    (syntax-rules ()
+      [(_ field (arg ...) default)
+       (let ([hooks (get-dist-hooks)])
+         (if hooks
+             ((field hooks) arg ...)
+             default))]))
 
   (define (@send-EXIT target-pid exit-pid exit-reason)
     (pcb-exit?-set! target-pid #t)
@@ -398,60 +426,178 @@
             [(enqueued? p) (void)]
             [else (@enqueue p run-queue 0)])))))
 
+  (define (@add-link from to)
+    (pcb-links-set! from (cons to (pcb-links from))))
+
   (define (@link p1 p2)
-    (define (add-link from to)
-      (pcb-links-set! from (cons to (pcb-links from))))
     (unless (memq p2 (pcb-links p1))
-      (add-link p1 p2)
-      (add-link p2 p1)))
+      (@add-link p1 p2)
+      (@add-link p2 p1)))
 
   (define (link p)
-    (unless (pcb? p)
-      (bad-arg 'link p))
-    (unless (eq? self p)
-      (no-interrupts
-       (cond
-        [(alive? p) (@link p self)]
-        [(pcb-trap-exit self)
-         (@send-EXIT self p (pcb-exception-state p))]
-        [else
-         (let ([r (pcb-exception-state p)])
-           (unless (eq? (unwrap-fault-condition r) 'normal)
-             (@kill self r)
-             (yield #f 0)))])))
+    (cond
+     [(pcb? p)
+      (unless (eq? self p)
+        (no-interrupts
+         (cond
+          [(alive? p) (@link p self)]
+          [(pcb-trap-exit self)
+           (@send-EXIT self p (pcb-exception-state p))]
+          [else
+           (let ([r (pcb-exception-state p)])
+             (unless (eq? (unwrap-fault-condition r) 'normal)
+               (@kill self r)
+               (yield #f 0)))])))]
+     [(rpid? p)
+      (unless (no-interrupts
+               (or (memq p (pcb-links self))
+                   (begin (@add-link self p) #f)))
+        (dist-call dist-hooks-link (self p)
+          ($remote-exit 'link self p 'noconnection)))]
+     [else (bad-arg 'link p)])
     #t)
 
   (define (unlink p)
-    (unless (pcb? p)
-      (bad-arg 'unlink p))
-    (no-interrupts
-     (@remove-link self p)
-     (@remove-link p self))
+    (cond
+     [(pcb? p)
+      (no-interrupts
+       (@remove-link self p)
+       (@remove-link p self))]
+     [(rpid? p)
+      (no-interrupts (@remove-link self p))
+      (dist-call dist-hooks-unlink (self p) (void))]
+     [else (bad-arg 'unlink p)])
     #t)
 
   (define (monitor? m) (mon? m))
 
+  (define (@add-monitor m p)
+    (pcb-monitors-set! p (cons m (pcb-monitors p))))
+
   (define (monitor p)
-    (define (add-monitor m p)
-      (pcb-monitors-set! p (cons m (pcb-monitors p))))
-    (unless (pcb? p)
-      (bad-arg 'monitor p))
-    (let ([m (make-mon self p)])
-      (no-interrupts
-       (if (alive? p)
-           (begin
-             (add-monitor m self)
-             (add-monitor m p))
-           (@send self (make-DOWN-msg m p (pcb-exception-state p)))))
-      m))
+    (cond
+     [(pcb? p)
+      (let ([m (make-mon self p)])
+        (no-interrupts
+         (if (alive? p)
+             (begin
+               (@add-monitor m self)
+               (@add-monitor m p))
+             (@send self (make-DOWN-msg m p (pcb-exception-state p)))))
+        m)]
+     [(rpid? p)
+      (let ([m (make-mon self p)])
+        (no-interrupts (@add-monitor m self))
+        (dist-call dist-hooks-monitor (m) ($remote-down m 'noconnection))
+        m)]
+     [else (bad-arg 'monitor p)]))
 
   (define (demonitor m)
     (unless (and (mon? m) (eq? (mon-origin m) self))
       (bad-arg 'demonitor m))
-    (no-interrupts
-     (@remove-monitor m self)
-     (@remove-monitor m (mon-target m)))
+    (let ([target (mon-target m)])
+      (cond
+       [(rpid? target)
+        (no-interrupts (@remove-monitor m self))
+        (dist-call dist-hooks-demonitor (m) (void))]
+       [else
+        (no-interrupts
+         (@remove-monitor m self)
+         (@remove-monitor m target))]))
     #t)
+
+  ;; Operations (swish dist) uses to deliver signals from remote processes.
+
+  (define ($remote-link p from)
+    ;; returns #t if linked, otherwise the exit reason of p
+    (no-interrupts
+     (cond
+      [(alive? p)
+       (unless (memq from (pcb-links p))
+         (@add-link p from))
+       #t]
+      [else (unwrap-fault-condition (pcb-exception-state p))])))
+
+  (define ($remote-unlink p from)
+    (no-interrupts (@remove-link p from))
+    (void))
+
+  (define ($remote-monitor m)
+    ;; returns #t if monitoring, otherwise the exit reason of the target
+    (let ([p (mon-target m)])
+      (no-interrupts
+       (cond
+        [(alive? p)
+         (unless (memq m (pcb-monitors p))
+           (@add-monitor m p))
+         #t]
+        [else (unwrap-fault-condition (pcb-exception-state p))]))))
+
+  (define ($remote-demonitor m)
+    (let ([p (mon-target m)])
+      (no-interrupts (@remove-monitor m p))
+      (void)))
+
+  ;; kind is link for an exit signal due to a link or kill for an explicit
+  ;; call to kill on a remote node.
+  (define ($remote-exit kind p from reason)
+    (no-interrupts
+     (when (alive? p)
+       (case kind
+         [(link)
+          (when (memq from (pcb-links p))
+            (@remove-link p from)
+            (cond
+             [(pcb-trap-exit p) (@send-EXIT p from reason)]
+             [(not (eq? (unwrap-fault-condition reason) 'normal))
+              (@kill p reason)]))]
+         [(kill)
+          (let ([r (unwrap-fault-condition reason)])
+            (cond
+             [(eq? r 'kill) (@kill p 'killed)]
+             [(pcb-trap-exit p) (@send-EXIT p from reason)]
+             [(not (eq? r 'normal)) (@kill p reason)]))]))
+     (unless (alive? self)
+       (yield #f 0)))
+    (void))
+
+  (define ($remote-down m reason)
+    (let ([origin (mon-origin m)])
+      (no-interrupts
+       (when (and (alive? origin) (memq m (pcb-monitors origin)))
+         (@remove-monitor m origin)
+         (@send origin (make-DOWN-msg m (mon-target m) reason))))
+      (void)))
+
+  ;; Deliver reason (e.g., noconnection) for every link and monitor
+  ;; involving a process on node. This walks the process table, which is
+  ;; simpler than tracking remote links and monitors per connection.
+  (define ($node-down node reason)
+    (define (on-node? x) (and (rpid? x) (eq? (rpid-node x) node)))
+    (no-interrupts
+     (vector-for-each
+      (lambda (p)
+        (when (alive? p)
+          (for-each
+           (lambda (m)
+             (cond
+              [(on-node? (mon-target m))
+               (@remove-monitor m p)
+               (@send p (make-DOWN-msg m (mon-target m) reason))]
+              [(on-node? (mon-origin m)) (@remove-monitor m p)]))
+           (pcb-monitors p))
+          (for-each
+           (lambda (x)
+             (when (and (on-node? x) (alive? p))
+               (@remove-link p x)
+               (cond
+                [(pcb-trap-exit p) (@send-EXIT p x reason)]
+                [else (@kill p reason)])))
+           (pcb-links p))))
+      (hashtable-keys process-table))
+     (unless (alive? self)
+       (yield #f 0)))
+    (void))
 
   (define (demonitor&flush m)
     (demonitor m)
@@ -628,7 +774,7 @@
                     (lambda (base)
                       (loop (cont 'link) (+ depth 1) base)))))])))]))
 
-  (define (process? p) (pcb? p))
+  (define (process? p) (or (pcb? p) (rpid? p)))
 
   (define (print-process p op)
     (with-process-details p
@@ -681,25 +827,28 @@
 
   (define (global-process-id pid)
     ($import-internal get-session-id)
-    (unless (pcb? pid)
-      (bad-arg 'global-process-id pid))
-    (format "~@[~d~]:~d" (get-session-id) (pcb-id pid)))
+    (cond
+     [(pcb? pid) (format "~@[~d~]:~d" (get-session-id) (pcb-id pid))]
+     [(rpid? pid) (format "~a:~d" (rpid-node pid) (rpid-id pid))]
+     [else (bad-arg 'global-process-id pid)]))
 
   (define process-id
     (case-lambda
      [() (pcb-id self)]
      [(p)
-      (unless (pcb? p)
-        (bad-arg 'process-id p))
-      (pcb-id p)]))
+      (cond
+       [(pcb? p) (pcb-id p)]
+       [(rpid? p) (rpid-id p)]
+       [else (bad-arg 'process-id p)])]))
 
   (define process-name
     (case-lambda
      [() (pcb-name self)]
      [(p)
-      (unless (pcb? p)
-        (bad-arg 'process-name p))
-      (pcb-name p)]))
+      (cond
+       [(pcb? p) (pcb-name p)]
+       [(rpid? p) #f]
+       [else (bad-arg 'process-name p)])]))
 
   (define (process-parent)
     (let ([x (weak-parent)])
@@ -758,6 +907,8 @@
         (unless dest
           (bad-arg 'send p))
         (no-interrupts (@send dest x)))]
+     [(rpid? p) (dist-call dist-hooks-send (p x) (void))]
+     [(get-dist-hooks) => (lambda (hooks) ((dist-hooks-send hooks) p x))]
      [else (bad-arg 'send p)]))
 
   (define (receive-after matcher src timeout timeout-handler)
@@ -1034,6 +1185,8 @@
     (unless (null? links)
       (let ([linked (car links)])
         (cond
+         [(rpid? linked)
+          (@dist-hook dist-hooks-exit 'link linked p raw-reason)]
          [(not (alive? linked))]
          [(pcb-trap-exit linked) (@send-EXIT linked p raw-reason)]
          [(not (eq? reason 'normal)) (@kill linked raw-reason)]))
@@ -1774,17 +1927,31 @@
           (wr name p)))
       (write-char #\> p)))
 
+  (record-writer (record-type-descriptor rpid)
+    (lambda (r p wr)
+      (display-string "#<process " p)
+      (display-string (global-process-id r) p)
+      (write-char #\> p)))
+
   ;; support equal-hash on mon and pcb records so folks don't get burned
   ;; by the default record-hash-procedure when using functional hash tables
   (record-type-hash-procedure (record-type-descriptor mon)
     (lambda (m hash)
       (match-define `(mon ,origin ,target) m)
-      (+ (pcb-id origin)
-         (ash (pcb-id target) (quotient (fixnum-width) 2)))))
+      (+ (process-id origin)
+         (ash (process-id target) (quotient (fixnum-width) 2)))))
 
   (record-type-hash-procedure (record-type-descriptor pcb)
     (lambda (pcb hash)
       (pcb-id pcb)))
+
+  (record-type-hash-procedure (record-type-descriptor rpid)
+    (lambda (r hash)
+      (rpid-id r)))
+
+  (set-dist-core!
+   (make-dist-core $remote-link $remote-unlink $remote-monitor
+     $remote-demonitor $remote-exit $remote-down $node-down pcb?))
 
   (record-writer (csv7:record-type-descriptor
                   (condition (make-error) (make-warning)))

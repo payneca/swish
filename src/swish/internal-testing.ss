@@ -21,6 +21,6 @@
 ;;; DEALINGS IN THE SOFTWARE.
 
 (library (swish internal-testing)
-  (export &fault-condition)
+  (export &fault-condition make-rpid rpid?)
   (import (scheme) (swish internal))
-  ($import-internal &fault-condition))
+  ($import-internal &fault-condition make-rpid rpid?))

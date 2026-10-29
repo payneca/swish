@@ -4795,3 +4795,51 @@
         [,x (cons x (lp))]))])
    'ok)
   )
+
+(isolate-mat rpid-without-dist ()
+  ;; Without (swish dist) hooks, a remote process identifier behaves like a
+  ;; process on a node to which we have no connection.
+  (define r (make-rpid 'nowhere@nohost 7 42))
+  (assert (rpid? r))
+  (assert (process? r))
+  (assert (= (process-id r) 42))
+  (assert (not (process-name r)))
+  (assert (equal? (global-process-id r) "nowhere@nohost:42"))
+  (assert (equal? (format "~s" r) "#<process nowhere@nohost:42>"))
+  (assert (= (equal-hash r) (equal-hash (make-rpid 'nowhere@nohost 7 42))))
+  ;; send and kill silently drop
+  (send r 'dropped)
+  (assert (eq? #t (kill r 'kill)))
+  (assert (eq? #t (unlink r)))
+  ;; monitor delivers DOWN with noconnection
+  (let ([m (monitor r)])
+    (assert (monitor? m))
+    (receive (after 1000 (throw 'timeout))
+      [`(DOWN ,@m ,@r noconnection) 'ok]))
+  (let ([m (monitor r)])
+    (assert (eq? #t (demonitor&flush m))))
+  ;; link delivers EXIT with noconnection
+  (process-trap-exit #t)
+  (assert (eq? #t (link r)))
+  (receive (after 1000 (throw 'timeout))
+    [`(EXIT ,@r noconnection) 'ok])
+  (process-trap-exit #f)
+  ;; and kills a process that is not trapping exits
+  (let* ([me self]
+         [p (spawn (lambda () (link r) (send me 'survived)))]
+         [m (monitor p)])
+    (receive (after 1000 (throw 'timeout))
+      [`(DOWN ,@m ,@p noconnection) 'ok]
+      [survived (throw 'survived)]))
+  ;; remote names need dist
+  (match (catch (send '#(foo bar@baz) 'x))
+    [#(EXIT #(bad-arg send #(foo bar@baz))) 'ok])
+  ;; local-only operations reject rpids
+  (match (catch (register 'remote r))
+    [#(EXIT #(bad-arg register ,@r)) 'ok])
+  (match (catch (keyboard-interrupt r))
+    [#(EXIT #(bad-arg keyboard-interrupt ,@r)) 'ok])
+  (match (catch (complete-io r))
+    [#(EXIT #(bad-arg complete-io ,@r)) 'ok])
+  (match (catch (with-process-details r list))
+    [#(EXIT #(bad-arg with-process-details ,@r)) 'ok]))
