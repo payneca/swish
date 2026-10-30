@@ -1,0 +1,555 @@
+% Copyright 2026 Chris Payne
+%
+% Permission is hereby granted, free of charge, to any person
+% obtaining a copy of this software and associated documentation files
+% (the "Software"), to deal in the Software without restriction,
+% including without limitation the rights to use, copy, modify, merge,
+% publish, distribute, sublicense, and/or sell copies of the Software,
+% and to permit persons to whom the Software is furnished to do so,
+% subject to the following conditions:
+%
+% The above copyright notice and this permission notice shall be
+% included in all copies or substantial portions of the Software.
+%
+% THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+% EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+% MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+% NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+% BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+% ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+% CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+% SOFTWARE.
+
+\chapter {Distribution}\label{chap:dist}
+
+\section {Introduction}
+
+The distribution library\index{distribution} lets processes in
+different Swish instances, called \emph{nodes}\index{node}, send
+messages to each other with the same \code{send} procedure used for
+local processes. A process on another node is represented locally by a
+\emph{remote process identifier}\index{remote process identifier}, or
+remote pid. Remote pids satisfy \code{process?}, and \code{send},
+\code{link}, \code{unlink}, \code{monitor}, \code{demonitor},
+\code{demonitor\&flush}, and \code{kill} accept them. As a result,
+higher-level behaviors such as \code{gen-server:call} and supervisors
+work across nodes without change.
+
+A node starts distribution by calling \code{dist:start\&link} with a
+node name and a shared secret, called a \emph{cookie}\index{cookie}.
+Nodes that use the same cookie can connect to each other with
+\code{dist:connect}. Each pair of nodes shares one connection, over TCP
+or WebSocket. Once two nodes are connected, a message that contains
+processes or monitors can be sent from one node to the other, and the
+receiver gets the same identities back.
+
+The following example connects two nodes on the same machine. On node
+\code{alpha}, a process registered as \code{echo} replies to each
+message:\antipar
+
+\begin{alltt}
+(dist:start\&link 'alpha@localhost "secret" 9001 "127.0.0.1")
+(register 'echo
+  (spawn
+   (lambda ()
+     (let lp ()
+       (receive
+        [#(echo ,from ,msg) (send from `#(echoed ,msg))])
+       (lp)))))
+\end{alltt}
+
+On node \code{beta}, a process connects to \code{alpha}, sends a
+message to the registered name \code{echo} on node
+\code{alpha@localhost}, and waits for the reply:\antipar
+
+\begin{alltt}
+(dist:start\&link 'beta@localhost "secret" 9002 "127.0.0.1")
+(dist:connect "127.0.0.1:9001")         \(\Rightarrow\) #(ok alpha@localhost)
+(send '#(echo alpha@localhost) `#(echo ,self "hello"))
+(receive [#(echoed ,msg) msg])          \(\Rightarrow\) "hello"
+\end{alltt}
+
+The library also provides remote spawn
+(Section~\ref{sec:dist-remote-spawn}) and a name registry shared by all
+connected nodes (Section~\ref{sec:dist-global-names}).
+
+The design follows Erlang's distribution, with these
+differences:\antipar
+
+\begin{itemize}
+\item Nodes connect only when \code{dist:connect} is called. Sending to
+  an unconnected node does not connect to it, and connected nodes do
+  not form a mesh.
+\item Sending a message that cannot be serialized, such as one that
+  contains a procedure, raises an exception in the sender.
+\item There is no heartbeat. A node notices a lost connection when the
+  underlying socket closes.
+\end{itemize}
+
+\section {Theory of Operation}
+
+\subsection {Nodes}
+
+A node name\index{node!name} is a symbol of the form
+\code{\var{name}@\var{host}}. When \code{dist:start\&link} is given a
+name without \code{@}, it appends \code{@} and the host name from
+\code{osi\_get\_hostname}. A node also has a
+\emph{creation}\index{node!creation}, the value of \code{(erlang:now)}
+when distribution started. A process identity on the wire includes the
+node name, creation, and process id. Remote pids from an earlier run of
+a node with the same name therefore never resolve to processes in the
+new run.
+
+Without distribution, \code{(dist:node)} returns
+\code{nonode@nohost}.
+
+\subsection {Remote Process Identifiers}
+
+A remote pid is a record with a node name, a creation, and a process id
+on that node. The distribution library interns remote pids, so a remote
+process has a single remote pid on each node. Remote pids can therefore
+be compared with \code{eq?} and matched by \code{match} patterns such as
+\code{,@pid}. Remote monitors are interned the same way, so the
+\code{,@m} patterns used by \code{gen-server:call} work across nodes.
+
+The process procedures of Chapter~\ref{chap:erlang} treat remote pids as
+follows:\antipar
+
+\begin{itemize}
+\item \code{process?} returns \code{\#t}.
+\item \code{process-id} returns the process's id on its own node, so it
+  can equal the id of an unrelated local process.
+\item \code{process-name} returns \code{\#f}, even if the process is
+  registered on its own node.
+\item \code{global-process-id} returns
+  \code{"\var{node}:\var{id}"}.
+\item A remote pid prints as \code{\#<process \var{node}:\var{id}>}.
+\end{itemize}
+
+A local process that is sent to another node, directly or inside a
+message, is \emph{exported}\index{process!exported}. The distribution
+library holds a strong reference to an exported process until the
+process dies, so that remote nodes can still reach it. As a result,
+Swish does not garbage collect a blocked process once its pid has been
+sent to another node. After the process dies, the library holds it
+weakly, so that its identity resolves to the same local object for as
+long as local references to it remain.
+
+\subsection {Operations on Remote Processes}
+
+Operations on a remote pid are forwarded to its node over the
+connection to that node. Operations between one pair of processes
+arrive in the order they were sent.\antipar
+
+\begin{itemize}
+\item \code{(send \var{rpid} \var{message})} serializes \var{message}
+  in the sender. If serialization fails, the exception is raised in the
+  sender. If the node is not connected, the message is discarded. The
+  receiving node discards a message for a process that has exited.
+
+\item \code{(link \var{rpid})} records the link locally and asks the
+  remote node to record it too. If the remote process has exited, the
+  caller receives an exit signal with reason \code{noproc}. If the node
+  is not connected, the reason is \code{noconnection}. As with a local
+  link, the caller receives an \code{EXIT} message if it traps exits,
+  and otherwise it is killed.
+
+\item \code{(monitor \var{rpid})} returns a monitor. If the remote
+  process has exited, the caller receives a \code{DOWN} message with
+  reason \code{noproc}. If the node is not connected, the reason is
+  \code{noconnection}.
+
+\item \code{(kill \var{rpid} \var{reason})} sends an exit signal that
+  the remote node handles as a local \code{kill} would: reason
+  \code{kill} kills the process with reason \code{killed}, a process
+  that traps exits receives an \code{EXIT} message, and reason
+  \code{normal} is otherwise ignored.
+
+\item \code{unlink}, \code{demonitor}, and \code{demonitor\&flush}
+  remove the link or monitor on both nodes.
+\end{itemize}
+
+When a local process exits, the library sends an exit signal to each
+linked remote process and a \code{DOWN} message to each remote process
+that monitors it. Exit reasons are sent without their fault-condition
+wrapper, so the stack is not available on the receiving node. A reason
+that cannot be serialized, such as a Chez Scheme condition, is replaced
+by \code{\#(unserializable-reason \var{string})}, where \var{string} is
+the printed reason.
+
+When a connection closes, every link to a process on that node fires
+with reason \code{noconnection}, and every monitor of a process on that
+node delivers a \code{DOWN} message with reason
+\code{noconnection}.
+
+When distribution is not running, a remote pid acts like a process on a
+node that is not connected: \code{send} discards the message,
+\code{link} delivers an exit signal with reason \code{noconnection}, and
+\code{monitor} delivers a \code{DOWN} message with reason
+\code{noconnection}.
+
+\subsection {Destinations}
+
+In addition to processes and registered names, \code{send} accepts the
+following destinations when distribution is running:\antipar
+
+\begin{itemize}
+\item \code{\#(\var{name} \var{node})}: the process registered as
+  \var{name} on \var{node}. If \var{node} is the local node, this is
+  the same as sending to \var{name}. If \var{node} is not connected,
+  the message is discarded. If no process is registered as \var{name}
+  on \var{node}, the receiving node discards the message.
+
+\item \code{\#(global \var{name})}: the process registered as
+  \var{name} with \code{global:register}. If there is no such process,
+  exception \code{\#(bad-arg send \var{destination})} is raised. This
+  form takes precedence over \code{\#(\var{name} \var{node})}, so a
+  process registered locally as \code{global} cannot be reached as
+  \code{\#(global \var{node})}.
+\end{itemize}
+
+\subsection {Connections}
+
+A connection carries \emph{frames}\index{distribution!frame}. A frame
+is a 4-byte big-endian length followed by two objects encoded with
+\code{fasl-write}: a vector of tokens and a body. When writing the
+body, the library uses \code{fasl-write}'s external-object predicate
+to replace each process and monitor with an index into the token
+vector. A process token is \code{\#(p \var{node} \var{creation}
+\var{id})}. A monitor token is \code{\#(m \var{key} \var{origin}
+\var{target})}, where \var{key} is \code{\#(\var{node}
+\var{creation} \var{id})} for the node that created the monitor and
+\var{origin} and \var{target} are process tokens. The receiver
+converts the tokens to local processes or interned remote pids and
+monitors, and it passes the result to \code{fasl-read} as the
+externals vector. A frame is limited to 64~MiB.
+
+The TCP carrier writes frames to a socket with \code{TCP\_NODELAY}
+set. The WebSocket carrier sends each frame, including its length, as
+one binary WebSocket message.
+
+\paragraph* {handshake}\index{distribution!handshake} After a
+connection opens, both sides send \code{\#(hello \var{version}
+\var{node} \var{creation} \var{challenge})}, where \var{challenge} is a
+random 16-byte bytevector. Each side then sends \code{\#(proof
+\var{proof})}, where \var{proof} is the HMAC-SHA1 of the peer's
+challenge followed by the UTF-8 node name of the sender, keyed with the
+cookie. A connection is closed if the peer's proof does not match
+(reason \code{bad-cookie}), if the peer uses the local node name
+(reason \code{same-node}), if the handshake does not finish within 10
+seconds (reason \code{handshake-timeout}), or if the node is already
+connected. In the last case, the existing connection is kept.
+
+Each connection runs in a process that writes outgoing frames, and a
+linked reader process decodes and handles incoming frames. Both
+processes exit when the carrier fails, and the connection process
+closes the carrier when it exits.
+
+\subsection {Supervision}
+
+\code{dist:start\&link} starts a one-for-all supervisor registered as
+\code{dist-sup} with the following children:\antipar
+
+\begin{itemize}
+\item \code{dist-conn-sup}: a watcher for the connection processes
+\item \code{net-kernel}: the gen-server that listens for and starts
+  connections
+\item \code{global-name-server}: the gen-server that holds this node's
+  copy of the global name table
+\item \code{dist-http}: an HTTP server that accepts WebSocket
+  connections, present only when a WebSocket port is given
+\end{itemize}
+
+The supervisor allows no restarts, so distribution stops if any child
+fails.
+
+\genserver{net-kernel}{init} The \code{init} procedure traps exits,
+listens for TCP connections on the given address and port, records the
+node name and a new creation, and installs the hooks through which
+\code{send}, \code{link}, \code{monitor}, and related procedures reach
+the distribution library. Its state holds the listener, the cookie,
+the open connections, and the callers waiting in
+\code{dist:connect}.
+
+\genserver{net-kernel}{terminate} The \code{terminate} procedure closes
+the listener and removes the hooks. Every link and monitor that refers
+to a remote process then fires with reason \code{noconnection}.
+
+\genserver{net-kernel}{handle-call} The \code{handle-call} procedure
+handles the following messages:\antipar
+
+\begin{itemize}
+\item \code{\#(connect \var{address})}: Start a connection to
+  \var{address} under \code{dist-conn-sup}, and reply when it either
+  finishes its handshake or exits.
+\item \code{\#(up \var{node} \var{creation} \var{pid})}: Sent by a
+  connection after its handshake. If \var{node} is already connected,
+  reply \code{duplicate}. Otherwise, record \var{pid} as the connection
+  for \var{node}, notify \code{global-name-server}, and reply
+  \code{ok}.
+\item \code{\#(accept-ws \var{handler})}: Start a connection for a
+  WebSocket request being handled by \var{handler}.
+\item \code{listen-port}: Reply with the TCP listener's port number.
+\item \code{\#(disconnect \var{node})}: Kill the connection for
+  \var{node} with reason \code{shutdown}, if any.
+\end{itemize}
+
+\genserver{net-kernel}{handle-info} The \code{handle-info} procedure
+starts a connection for each accepted TCP connection. It stops when the
+listener fails. When a connection exits, it removes the node and
+delivers \code{noconnection} for that node's links and monitors. When
+an exported process exits, it switches that process to a weak
+reference.
+
+\subsection {Remote Spawn}\label{sec:dist-remote-spawn}
+
+\code{dist:spawn} and \code{dist:spawn\&link} start a process on
+another node. No code crosses the wire. The caller names a procedure
+with \code{\#(\var{module} \var{proc} \var{args})}, and the remote node
+looks it up with \code{(top-level-value \var{proc} (environment
+\var{module}))}, or in \code{(interaction-environment)} when
+\var{module} is \code{\#f}. The procedure must therefore be defined on
+the remote node. The remote node applies it to \var{args} in a new
+process. For \code{dist:spawn\&link}, the link is set up on both nodes
+before the caller receives the pid, so an early exit is not missed.
+
+\subsection {Global Names}\label{sec:dist-global-names}
+
+Global names\index{global names} are names registered on all connected
+nodes. Each node's \code{global-name-server} holds a copy of the name
+table. To register a name, the caller locks it on every
+\code{global-name-server}, in order of node name, and then registers it
+on each one, which also releases the lock. If a lock is held by another
+caller, the caller releases the locks it holds, waits a random 1--20
+milliseconds, and tries again. Each server monitors registered
+processes and lock holders, so a name disappears when its process exits
+or its node disconnects.
+
+When two nodes connect, their servers exchange tables. If both have a
+process registered under the same name, for example after a network
+partition heals, each server keeps the process that sorts first by
+node name and then by process id. It kills the other process with
+reason \code{\#(global-name-conflict \var{name})}. Both nodes choose the
+same winner.
+
+Global names reach only nodes that are directly connected. A name
+registered between a connect and the table exchange is not locked
+against the new node, and a conflict of this kind is resolved in the
+same way.
+
+\subsection {WebSocket Transport}
+
+A node accepts WebSocket connections at path \code{/dist} when
+\code{dist:start\&link} is given a WebSocket port, or when an
+application adds \code{(dist:url-handler)} to its own HTTP server (see
+Chapter~\ref{chap:http}). An address of the form
+\code{ws://\var{host}:\var{port}/\var{path}} makes \code{dist:connect}
+use WebSocket. The handshake and everything above it are the same as
+for TCP.
+
+\subsection {Security}
+
+The cookie handshake keeps nodes with different cookies from
+connecting, but it is not encryption: frames are sent in the clear. A
+connected node is fully trusted. It can send any object that
+\code{fasl-read} can build, kill local processes, and call any
+procedure that \code{dist:spawn} can name. Use distribution only on
+trusted networks, or carry it over a secure tunnel.
+
+\subsection {Limitations}
+
+\begin{itemize}
+\item If two nodes connect to each other at the same moment, both
+  connections can be closed as duplicates. Calling \code{dist:connect}
+  again establishes a single connection.
+\item When a connection closes, the library scans every process to
+  deliver \code{noconnection}.
+\item A link exit signal for a link that no longer exists is ignored.
+  There is no unlink acknowledgment.
+\item The WebSocket server started by \code{dist:start\&link} listens on
+  all interfaces, regardless of the address argument.
+\end{itemize}
+
+\section {Programming Interface}
+
+\defineentry{dist:start\&link}
+\begin{procedure}
+  \code{(dist:start\&link \var{name} \var{cookie} \opt{\var{port}
+      \opt{\var{address} \opt{\var{ws-port}}}})}
+\end{procedure}
+\returns{}
+\code{\#(ok \var{pid})} $|$
+\code{\#(error \var{reason})}
+
+The \code{dist:start\&link} procedure starts distribution under a
+supervisor registered as \code{dist-sup} and links it to the calling
+process. \var{name} is a symbol. If it does not contain \code{@},
+\code{@} and the host name are appended. \var{cookie} is a string,
+which is converted to UTF-8, or a bytevector. The node listens for TCP
+connections on \var{port} (default 0, for any available port) at
+\var{address} (default \code{"0.0.0.0"}). If \var{ws-port} is not
+\code{\#f} (the default), the node also accepts WebSocket connections
+at \code{/dist} on an HTTP server listening on \var{ws-port}.
+
+Because the supervisor is linked to the caller, a process that exits
+while linked to it stops distribution. Start distribution from a
+long-lived process or from an application's supervision tree.
+
+\defineentry{dist:stop}
+\begin{procedure}
+  \code{(dist:stop)}
+\end{procedure}
+\returns{} \code{ok}
+
+The \code{dist:stop} procedure kills \code{dist-sup} with reason
+\code{shutdown}, if it is running, and waits for it to exit. All
+connections close, so links and monitors to remote processes fire with
+reason \code{noconnection}.
+
+\defineentry{dist:connect}
+\begin{procedure}
+  \code{(dist:connect \var{address} \opt{\var{timeout}})}
+\end{procedure}
+\returns{}
+\code{\#(ok \var{node})} $|$
+\code{\#(error \var{reason})}
+
+The \code{dist:connect} procedure connects to the node at \var{address}
+and returns its name. \var{address} is a string of the form
+\code{"\var{host}:\var{port}"}, \code{"[\var{ipv6-host}]:\var{port}"},
+or \code{"ws://\var{host}:\var{port}\opt{/\var{path}}"}, where
+\var{path} defaults to \code{/dist}. If the address cannot be parsed,
+exception \code{\#(bad-address \var{address})} is raised. If the
+connection or handshake fails, \var{reason} is the connection's exit
+reason, such as \code{bad-cookie}. \var{timeout} is passed to
+\code{gen-server:call} and defaults to 30000 milliseconds. If \var{node}
+is already connected, the existing connection is kept and
+\code{\#(ok \var{node})} is returned.
+
+\defineentry{dist:disconnect}
+\begin{procedure}
+  \code{(dist:disconnect \var{node})}
+\end{procedure}
+\returns{} a boolean
+
+The \code{dist:disconnect} procedure closes the connection to
+\var{node} and returns \code{\#t}. If \var{node} is not connected, it
+returns \code{\#f}. Links and monitors to processes on \var{node} fire
+with reason \code{noconnection}.
+
+\defineentry{dist:node}
+\begin{procedure}
+  \code{(dist:node \opt{\var{process}})}
+\end{procedure}
+\returns{} a symbol
+
+The \code{dist:node} procedure returns the name of the node on which
+\var{process} runs. Without an argument, it returns the local node
+name, or \code{nonode@nohost} when distribution is not running. If
+\var{process} is not a process, exception \code{\#(bad-arg dist:node
+\var{process})} is raised.
+
+\defineentry{dist:nodes}
+\begin{procedure}
+  \code{(dist:nodes)}
+\end{procedure}
+\returns{} a list of symbols
+
+The \code{dist:nodes} procedure returns the names of the connected
+nodes, sorted alphabetically.
+
+\defineentry{dist:listen-port}
+\begin{procedure}
+  \code{(dist:listen-port)}
+\end{procedure}
+\returns{} a port number
+
+The \code{dist:listen-port} procedure returns the TCP port on which the
+node accepts connections. It is useful when \code{dist:start\&link}
+was called with port 0.
+
+\defineentry{dist:websocket-port}
+\begin{procedure}
+  \code{(dist:websocket-port)}
+\end{procedure}
+\returns{} a port number
+
+The \code{dist:websocket-port} procedure returns the port of the HTTP
+server started by \code{dist:start\&link} for WebSocket connections.
+
+\defineentry{dist:url-handler}
+\begin{procedure}
+  \code{(dist:url-handler)}
+\end{procedure}
+\returns{} a URL handler
+
+The \code{dist:url-handler} procedure returns an
+\code{http:url-handler} that accepts distribution connections over
+WebSocket at path \code{/dist}. Use it to accept connections on an
+application's existing HTTP server. The handler declines requests for
+other paths, and all requests when distribution is not running.
+
+\defineentry{dist:spawn}
+\begin{procedure}
+  \code{(dist:spawn \var{node} \#(\var{module} \var{proc} \var{args}))}
+\end{procedure}
+\returns{} a process
+
+\defineentry{dist:spawn\&link}
+\begin{procedure}
+  \code{(dist:spawn\&link \var{node} \#(\var{module} \var{proc} \var{args}))}
+\end{procedure}
+\returns{} a process
+
+The \code{dist:spawn} procedure creates a process on \var{node} that
+applies the procedure named \var{proc} to the list \var{args}, and
+returns its pid. \var{module} is a library name, such as \code{(my
+lib)}, or \code{\#f} for the interaction environment, and \var{proc} is
+a symbol. If \var{node} is the local node, the process is created
+locally. The \code{dist:spawn\&link} procedure also links the new
+process to the caller, before the pid is returned.
+
+The following exceptions can be raised:\antipar
+
+\begin{itemize}
+\item \code{\#(noconnection \var{node})}: \var{node} is not connected,
+  or the connection closed before the reply arrived.
+\item \code{\#(bad-module \var{module})}: \var{module} cannot be found
+  on \var{node}.
+\item \code{\#(undefined-procedure \var{module} \var{proc})}:
+  \var{proc} is not bound in \var{module}.
+\item \code{\#(not-a-procedure \var{module} \var{proc})}: \var{proc}
+  is bound to a value that is not a procedure.
+\end{itemize}
+
+\defineentry{global:register}
+\begin{procedure}
+  \code{(global:register \var{name} \var{process})}
+\end{procedure}
+\returns{} \code{\#t}
+
+The \code{global:register} procedure registers \var{process} as
+\var{name} on every connected node. \var{name} is a symbol, and
+\var{process} may be local or remote. If \var{name} is already
+registered, exception \code{\#(name-already-registered \var{pid})} is
+raised. If the name stays locked by other callers after about 100
+attempts, exception \code{\#(global-lock-timeout \var{name})} is
+raised.
+
+\defineentry{global:unregister}
+\begin{procedure}
+  \code{(global:unregister \var{name})}
+\end{procedure}
+\returns{} \code{\#t}
+
+The \code{global:unregister} procedure removes \var{name} from every
+connected node.
+
+\defineentry{global:whereis}
+\begin{procedure}
+  \code{(global:whereis \var{name})}
+\end{procedure}
+\returns{} a process or \code{\#f}
+
+The \code{global:whereis} procedure returns the process registered
+globally as \var{name}, or \code{\#f} if there is none.

@@ -530,6 +530,10 @@ The \code{kill} procedure is used to terminate a process.
 \item Otherwise, \var{process} is terminated with \var{reason}.
 \end{enumerate}
 
+If \var{process} is a remote process, the exit signal is sent to its
+node, which applies the steps above there. If the node is not
+connected, nothing happens. See Chapter~\ref{chap:dist}.
+
 % ----------------------------------------------------------------------------
 \defineentry{link}
 \begin{procedure}
@@ -561,6 +565,11 @@ can exist between two processes, but it is not an error to call
   \end{enumerate}
 \end{enumerate}
 
+If \var{process} is a remote process, the link is also recorded on its
+node. If the remote process has exited, $r$ = \code{noproc}. If its
+node is not connected, or the connection to its node closes later,
+$r$ = \code{noconnection}. See Chapter~\ref{chap:dist}.
+
 % ----------------------------------------------------------------------------
 \defineentry{monitor}
 \begin{procedure}
@@ -578,7 +587,10 @@ already exited with reason $r$, a message matching
 \code{`(DOWN $m$ \var{process} $r$)} is sent to \var{self}.
 If \var{process} is not
 a process, exception \code{\#(bad-arg monitor \var{process})} is
-raised.
+raised. If \var{process} is a remote process that has exited, $r$ =
+\code{noproc}. If its node is not connected, or the connection to its
+node closes later, $r$ = \code{noconnection}. See
+Chapter~\ref{chap:dist}.
 
 % ----------------------------------------------------------------------------
 \defineentry{monitor?}
@@ -890,6 +902,15 @@ is awakened.  If \var{destination} is not blocked for I/O and not on
 the run queue\index{run queue}, it is placed on the run queue with
 precedence 0.
 
+If \var{destination} is a remote process, \var{message} is serialized
+in the calling process and sent to its node. If \var{message} cannot
+be serialized, an exception is raised. If the node is not connected,
+\var{message} is discarded. When distribution is running,
+\var{destination} may also be \code{\#(\var{name} \var{node})}, for
+the process registered as \var{name} on \var{node}, or \code{\#(global
+\var{name})}, for a process registered with \code{global:register}.
+See Chapter~\ref{chap:dist}.
+
 % ----------------------------------------------------------------------------
 \subsection {Process Properties}
 
@@ -913,7 +934,8 @@ port. If \var{op} is not an output port, exception \code{\#(bad-arg
 \returns{} a boolean
 
 The \code{process?} procedure determines whether or not the datum
-\var{x} is a process.
+\var{x} is a process. Remote processes (see Chapter~\ref{chap:dist})
+are processes.
 
 % ----------------------------------------------------------------------------
 \defineentry{process-id}
@@ -925,7 +947,8 @@ The \code{process?} procedure determines whether or not the datum
 The \code{process-id} procedure returns \var{process}.\code{id},
 where \var{process} defaults to \code{self}. If \var{process} is not
 a process, exception \code{\#(bad-arg process-id \var{process})} is
-raised.
+raised. For a remote process, it returns the id of the process on its
+own node, which can equal the id of an unrelated local process.
 
 % ----------------------------------------------------------------------------
 \defineentry{global-process-id}
@@ -941,6 +964,9 @@ If the \hyperref[chap:log-db]{\code{log-db}} gen-server has been started, then
 \var{session-id} is an integer session identifier that is unique in that
 database instance.
 Otherwise, \var{session-id} is omitted.
+For a remote process, the string has the form
+\code{"\var{node}:\var{process-id}"}, where \var{node} is the name of
+the process's node.
 If \var{process} is not a process, exception \code{\#(bad-arg global-process-id
 \var{process})} is raised.
 
@@ -954,7 +980,8 @@ If \var{process} is not a process, exception \code{\#(bad-arg global-process-id
 The \code{process-name} procedure returns \var{process}.\code{name},
 where \var{process} defaults to \code{self}. If \var{process} is not a
 process, exception \code{\#(bad-arg process-name \var{process})} is
-raised.
+raised. For a remote process, it returns \code{\#f}, even if the
+process is registered on its own node.
 
 % ----------------------------------------------------------------------------
 \defineentry{process-parent}
